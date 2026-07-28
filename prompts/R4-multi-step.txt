@@ -1,0 +1,2 @@
+Además de acciones aisladas, ¿cómo correlacionás una cadena read-secret → temp →
+network post? Al menos correlation_id + regla de alto riesgo en cadena.

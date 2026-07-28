@@ -1,0 +1,19 @@
+{
+  "sandbox_root": "demo_workspace",
+  "protected_paths": [
+    "demo_workspace/.env",
+    "demo_workspace/fake_credentials.txt"
+  ],
+  "writable_dirs": [
+    "demo_workspace/normal"
+  ],
+  "shell_allowlist": ["ls", "grep", "cat", "head", "tail", "find", "wc"],
+  "shell_forbidden_args": {
+    "find": ["-exec", "-execdir", "-delete"]
+  },
+  "network": { "mode": "deny_all" },
+  "mcp_registry": {
+    "demo": ["ping", "echo"]
+  },
+  "approval_timeout_sec": 30
+}

@@ -1,0 +1,3 @@
+¿Cómo evitás bypass por symlink y .. ? Necesito resolve canónico + verificación
+de que el path final queda dentro de sandbox_root. Sin eso el filesystem adapter
+no es aceptable.

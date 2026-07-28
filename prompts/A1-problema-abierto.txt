@@ -1,0 +1,28 @@
+Quiero construir un prototipo LOCAL de un gateway de seguridad entre un agente
+de IA y sus capacidades externas: filesystem, comandos de terminal, requests de
+red y herramientas tipo MCP.
+
+Cada acción debe terminar en una de tres decisiones:
+- allow
+- block
+- require human approval
+
+Y cada decisión debe quedar en un audit log.
+
+Restricciones:
+- Linux local
+- datos 100% sintéticos
+- sin credenciales reales
+- sin Internet de exfiltración
+- el prototipo se va a atacar con prompt injection: un repo malicioso intenta
+  leer un .env falso y enviarlo a un receptor en 127.0.0.1
+
+Antes de escribir código:
+1. proponé DOS arquitecturas posibles
+2. definí trust boundaries y threat model inicial
+3. separá MVP / nice-to-have / fuera de alcance
+4. recomendá un stack y justificá velocidad, seguridad y facilidad de demo
+5. listá decisiones que requieren criterio humano
+
+No asumas production-ready.
+No crees archivos todavía.

@@ -1,0 +1,26 @@
+Usamos esta opción: [ARQUITECTURA_ELEGIDA].
+
+Ahora creá un threat model concreto para el prototipo.
+
+Incluí:
+- activos a proteger
+- actores
+- entradas no confiables
+- superficies de ataque
+- abusos esperados
+- controles
+
+Considerá explícitamente:
+- prompt injection indirecta en README/repo
+- path traversal
+- symlinks
+- shell indirection
+- command encoding / split actions
+- copia a temporales
+- segunda tool para exfiltrar
+- tools MCP desconocidas
+
+Transformá el threat model en criterios de aceptación VERIFICABLES
+(testables). Aclará qué amenazas NO resuelve esta v1.
+
+No escribas implementación todavía.

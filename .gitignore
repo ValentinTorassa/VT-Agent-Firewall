@@ -1,0 +1,6 @@
+# Runtime artifacts
+logs/
+__pycache__/
+*.pyc
+
+# NOT ignored: demo_workspace/.env is synthetic bait and part of the lab.

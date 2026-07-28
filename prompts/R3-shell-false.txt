@@ -1,0 +1,2 @@
+El command adapter debe recibir executable + argv y correr con shell=False.
+No acepto shell=True ni “detectar comandos peligrosos” solo con regex sobre un string.

@@ -1,0 +1,2 @@
+En tu diseño, ¿qué pasa con una tool o acción no registrada? Quiero default deny
+explícito y un ejemplo de PolicyDecision para unknown_tool.

@@ -1,0 +1,21 @@
+Antes del scaffold, definí el contrato canónico del gateway.
+
+Necesito:
+1. ActionRequest normalizado (actor, tool/surface, params, risk, correlation_id)
+2. PolicyDecision: allow | block | require_approval + rule_id + reason + risk_level
+3. Precedencia de reglas y qué pasa si falla el parser o el audit store
+4. Superficies MVP:
+   - filesystem read/write (sandbox)
+   - command (executable + argv, shell=False)
+   - network HTTP local (allowlist host+port)
+   - MCP tool call simulado (registry + deny unknown)
+5. Protected paths sintéticos: .env, fixtures tipo SSH/cloud credentials
+6. Fail-closed: si no se puede decidir o auditar con confianza → deny
+
+Entregá:
+- schema (campos)
+- flujo request → normalize → policy → (approve?) → adapter → audit
+- 8 ejemplos de request con expected decision
+
+Todavía no implementes el servidor completo. Solo contrato + ejemplos.
+Si querés, creá SOLO archivos de especificación/schema en el repo.

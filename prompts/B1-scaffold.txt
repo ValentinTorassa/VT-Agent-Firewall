@@ -1,0 +1,13 @@
+Implementá el scaffold mínimo del gateway según el contrato aprobado.
+
+Restricciones:
+- trabajá SOLO dentro del directorio actual del repo
+- no leas home, SSH real, cloud credentials reales ni repos externos
+- no hagas requests a Internet
+- usá valores sintéticos
+- separá policy decision de tool execution
+- agregá README con setup, test y reset locales
+- health check + test mínimo del action contract
+
+Antes de ejecutar comandos, mostrame la lista exacta para que yo apruebe.
+Después creá archivos, corré solo los checks necesarios y resumí cada cambio.
