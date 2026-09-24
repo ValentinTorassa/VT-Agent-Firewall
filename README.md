@@ -34,7 +34,7 @@ cd VT-Agent-Firewall
 python3 scripts/run_demo.py --health       # static sanity checks
 python3 scripts/run_demo.py                # the attack, through the gateway
 python3 scripts/run_demo.py --no-firewall  # contrast: the same attack without it
-python3 -m unittest discover -s tests -v   # acceptance tests AC1–AC12
+python3 -m unittest discover -s tests -v   # AC1–AC12 + the four OAuth failure modes
 ```
 
 ## The demo
@@ -60,14 +60,44 @@ All data in `demo_workspace/` is synthetic bait.
 | `mcp-unknown-tool` | block MCP server/tool pairs outside the registry |
 | `approval-denied` | block when the human says no, times out, or stdin is not interactive |
 | `fail-closed` | block everything when the audit store is unavailable |
+| `api-ok` / `api-approval` / `api-blocked` | per-operation decision for `api.call`, taken before any credential exists |
+| `api-unknown-operation` | block audience/operation pairs outside the policy (default-deny) |
+
+## Delegated credentials (`api.call`)
+
+When an agent calls an API on a person's behalf, the gateway decides the operation
+first and only then asks a token broker (`agent_firewall/credentials.py`) for a
+credential:
+
+- The user's consent is a grant held by the broker, **refresh token included; no
+  method ever returns it.**
+- Each allowed call gets its own access token: one audience, exactly the scope that
+  operation needs, five minutes of life, and the agent named as the actor (RFC 8693
+  token exchange, simplified).
+- Resource servers validate it by introspection (RFC 7662 style). Revoking the grant
+  stops new tokens and kills live ones.
+- The agent never sees a token. The audit record keeps the claims (`jti`, scope,
+  expiry), never the bearer value.
+
+`tests/test_delegation.py` covers the four ways delegation breaks when the caller is
+an agent. Each failure mode is a pair: the pattern commonly shipped today (the attack
+works) and the same attack through the gateway (it is stopped):
+
+| Failure mode | Naive pattern | With the broker |
+|---|---|---|
+| Scope that stays open | a token from task 1 sends mail the next day | per-call, one-scope, 5-minute tokens; wrong audience rejected |
+| Refresh token as permanent access | a leaked refresh token mints tokens 60 days later | the refresh token never leaves the broker; revocation kills live tokens |
+| Authentication mistaken for authorization | any live token may send or delete | the policy decides each operation before a token exists |
+| Confused deputy | a tool uses its own broad credential | the tool gets an exchanged token for one audience and scope |
 
 ## Layout
 
 ```text
-agent_firewall/   models, config, policy, executor, audit, approval, gateway
+agent_firewall/   models, config, policy, executor, audit, approval, gateway,
+                  credentials (token broker), mock_apis
 policies/         default.json: sandbox, protected paths, allowlists, MCP registry
 scripts/          run_demo.py, mock_receiver.py
-tests/            acceptance tests AC1–AC12
+tests/            acceptance tests AC1–AC12; test_delegation.py (the four OAuth failure modes)
 docs/             THREAT_MODEL.md; build-prompts/ (how the first version was scaffolded)
 demo_workspace/   synthetic sandbox for the demo
 ```
@@ -82,14 +112,14 @@ These are deliberate v0 boundaries, not hidden ones:
 - **Allowed actions are audited after they run** (denials are audited before). A
   crash between execution and audit would leave an allowed action unrecorded.
 - **MCP is simulated** and the agent is a scripted list of requests.
-- **No delegated credentials yet.** The OAuth layer (short-lived, per-tool,
-  audience-bound tokens; the agent never holds a refresh token) is the next milestone.
+- **Tokens are bearer tokens.** They are not sender-constrained (DPoP) yet: a stolen
+  access token works for anyone until it expires, which is why it lives five minutes.
+- **The APIs are mocks** (`agent_firewall/mock_apis.py`) and the broker is in-process.
 
 ## Roadmap to v0.1.0
 
-1. Token broker for delegated credentials, with one test per OAuth failure mode:
-   scope that stays open, refresh token as permanent access, authentication mistaken
-   for authorization, confused deputy.
+1. ~~Token broker for delegated credentials, with tests for the four OAuth failure
+   modes.~~ Done.
 2. A real MCP proxy (stdio) in front of an actual MCP server, replacing the simulation.
 3. Release on PyPI as `vt-agent-firewall`.
 

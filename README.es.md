@@ -98,6 +98,20 @@ python3 scripts/run_demo.py --reset        # trunca logs/audit.jsonl
 | `approval-denied` | block: humano rechazó o timeout (stdin no interactivo = deny) |
 | `fail-closed` | block: audit store no disponible |
 
+## Credenciales delegadas (`api.call`)
+
+Cuando el agente llama a una API en nombre de una persona, el gateway decide la
+operación primero y recién después le pide un token al broker
+(`agent_firewall/credentials.py`): uno por llamada, con una sola audience, el scope
+exacto de esa operación y cinco minutos de vida. El refresh token queda dentro del
+broker y ningún método lo devuelve; el agente nunca ve un token y la auditoría guarda
+sólo los claims (`jti`, scope, expiración).
+
+`tests/test_delegation.py` cubre los cuatro modos de falla de la charla (scope que
+queda abierto, refresh token como acceso permanente, autenticar vs autorizar, confused
+deputy). Cada uno es un par: el patrón que se usa hoy, donde el ataque funciona, y el
+mismo ataque frenado por el gateway. Detalle en el [README en inglés](README.md#delegated-credentials-apicall).
+
 ## Limitaciones v1 (explícitas)
 
 - Sin sandbox de OS: un agente con ejecución de código fuera del pipeline

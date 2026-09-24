@@ -50,7 +50,7 @@ Status: **Implemented** (covered by tests or the demo), **Partial**, **Planned**
 | LLM02 Sensitive Information Disclosure | Protected paths blocked after `realpath`; touching one taints the session and blocks every network action afterwards. | Partial (path-level taint) |
 | LLM03 Supply Chain | MCP registry: only listed server/tool pairs are callable. | Partial |
 | LLM05 Improper Output Handling | Model output never reaches a shell: `shlex` to argv, `shell=False`, executor sees normalized params only. | Implemented |
-| LLM06 Excessive Agency | Default-deny per tool, shell allowlist and forbidden args, approval for out-of-scope writes. Per-tool scoped credentials are next. | Implemented; credentials Planned |
+| LLM06 Excessive Agency | Default-deny per tool, shell allowlist and forbidden args, approval for out-of-scope writes, per-call tokens scoped to one audience and operation. | Implemented |
 | LLM10 Unbounded Consumption | Read cap (64 KB), shell and network timeouts. No rate limiting. | Partial |
 | LLM04, LLM07, LLM08, LLM09 | Model-side risks (poisoning, system prompt leakage, embeddings, misinformation). | Out of scope |
 
@@ -60,7 +60,7 @@ Status: **Implemented** (covered by tests or the demo), **Partial**, **Planned**
 |---|---|---|
 | ASI01 Agent Goal Hijack | Same containment as LLM01: a hijacked goal still has to pass the policy. | Implemented (containment) |
 | ASI02 Tool Misuse and Exploitation | Every tool call is a typed request with per-tool checks; unknown tools are denied. | Implemented |
-| ASI03 Identity and Privilege Abuse | Token broker: short-lived tokens scoped per tool and audience, the agent never holds a refresh token, and the audit record ties each call to user, agent and tool. | **Planned (v0.1)** |
+| ASI03 Identity and Privilege Abuse | Token broker: short-lived tokens scoped per call and audience, the agent never holds a refresh token, and the audit record ties each call to user, agent and token `jti`. Not sender-constrained yet (no DPoP). | Implemented |
 | ASI04 Agentic Supply Chain Vulnerabilities | MCP registry today; a real MCP proxy that pins the server it talks to is next. | Partial |
 | ASI05 Unexpected Code Execution | Shell allowlist, forbidden arguments, argv path checks, `shell=False`. | Implemented |
 | ASI06 Memory and Context Poisoning | The gateway keeps no agent memory. | Out of scope |
@@ -69,7 +69,7 @@ Status: **Implemented** (covered by tests or the demo), **Partial**, **Planned**
 | ASI09 Human-Agent Trust Exploitation | The approval prompt shows the normalized action, never the agent's description; timeout or non-interactive stdin denies. | Implemented |
 | ASI10 Rogue Agents | Append-only audit of every decision; no behavioral detection. | Partial |
 
-## Delegated credentials: the four failure modes (v0.1)
+## Delegated credentials: the four failure modes
 
 The OAuth layer targets the ways delegation breaks when the caller is an agent:
 
@@ -83,7 +83,8 @@ The OAuth layer targets the ways delegation breaks when the caller is an agent:
    agent itself was not allowed to request. Tokens are exchanged for the specific
    audience and scope of the call, never forwarded as-is.
 
-Each one will ship with a test that fails without the broker and passes with it.
+Each one is a pair of tests in `tests/test_delegation.py`: the naive pattern where the
+attack works, and the same attack stopped by the gateway and the broker.
 
 ## Known limitations
 
@@ -92,3 +93,4 @@ Each one will ship with a test that fails without the broker and passes with it.
   is not detected.
 - Allowed actions are audited after execution; a crash in between leaves them unrecorded.
 - No TOCTOU protection between normalization and execution.
+- Access tokens are bearer tokens (no DPoP): a stolen one works until it expires (5 minutes).

@@ -30,6 +30,11 @@ class Config:
             srv: set(tools) for srv, tools in raw.get("mcp_registry", {}).items()
         }
         self.approval_timeout_sec = int(raw.get("approval_timeout_sec", 30))
+        # audience -> operation -> {"scope": ..., "decision": allow|require_approval|block}
+        self.apis = {
+            aud: {op: dict(rule) for op, rule in ops.items()}
+            for aud, ops in raw.get("apis", {}).items()
+        }
 
     @staticmethod
     def _abs(base: Path, p: str) -> Path:
