@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vt-agent-firewall"
-version = "0.1.0.dev0"
+version = "0.1.0"
 description = "A fail-closed gateway between an AI agent and its tools: normalize, default-deny policy, human approval, append-only audit."
 readme = "README.md"
 license = "Apache-2.0"
