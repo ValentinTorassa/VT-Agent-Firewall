@@ -14,7 +14,7 @@ from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from gateway import ActionRequest, Gateway  # noqa: E402
+from agent_firewall import ActionRequest, Gateway  # noqa: E402
 
 
 def make_workspace(root: Path) -> Path:
