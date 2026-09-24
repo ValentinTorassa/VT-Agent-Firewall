@@ -27,12 +27,16 @@ from .session import SessionState
 class Gateway:
     def __init__(self, config_path: str | Path, audit_path: str | Path,
                  approver=None, base_dir: str | Path | None = None,
-                 broker=None, subject: str | None = None, apis=None):
+                 broker=None, subject: str | None = None, apis=None,
+                 mcp_backends=None):
         self.config = Config(config_path, base_dir=base_dir)
         self.policy = PolicyEngine(self.config)
         # broker/subject/apis enable `api.call`: delegated credentials minted
         # per call. Without them every api.call fails closed in the executor.
-        self.executor = Executor(broker=broker, subject=subject, apis=apis)
+        # mcp_backends maps an MCP server name to a live connection (the MCP
+        # proxy); servers without one keep the simulated demo behavior.
+        self.executor = Executor(broker=broker, subject=subject, apis=apis,
+                                 mcp_backends=mcp_backends)
         self.approver = approver or TerminalApprover(self.config.approval_timeout_sec)
         self.session = SessionState()
         self._broken = False
@@ -44,13 +48,22 @@ class Gateway:
             self._broken = True
 
     def handle(self, req: ActionRequest) -> dict:
+        """Decide, execute if allowed, audit. Returns the audit record."""
+        return self.handle_with_result(req)[0]
+
+    def handle_with_result(self, req: ActionRequest) -> tuple[dict, object]:
+        """Same as `handle`, plus the full executor result (None unless executed).
+
+        The audit record only keeps a 200-character preview; callers that relay
+        the result (the MCP proxy) need all of it.
+        """
         if self._broken:
             decision = PolicyDecision(
                 request=req, decision=Decision.BLOCK, rule_id="fail-closed",
                 reason="audit store unavailable; refusing to act unaudited",
                 risk="high", rules_matched=["fail-closed"], normalized={},
             )
-            return self._record(decision, outcome="not_executed")
+            return self._record(decision, outcome="not_executed"), None
 
         decision = self.policy.evaluate(req, self.session)
 
@@ -66,7 +79,7 @@ class Gateway:
 
         if decision.decision == Decision.BLOCK:
             # Audit-first: the attempt is recorded before we return.
-            return self._record(decision, outcome="not_executed")
+            return self._record(decision, outcome="not_executed"), None
 
         try:
             result = self.executor.execute(decision.request.tool,
@@ -78,9 +91,9 @@ class Gateway:
                 extra["token"] = result["token"]
                 result = result["result"]
             return self._record(decision, outcome="executed",
-                                result_preview=str(result)[:200], **extra)
+                                result_preview=str(result)[:200], **extra), result
         except Exception as e:  # executor errors are audited, not hidden
-            return self._record(decision, outcome="error", error=str(e))
+            return self._record(decision, outcome="error", error=str(e)), None
 
     def _record(self, decision: PolicyDecision, outcome: str, **extra) -> dict:
         record = {

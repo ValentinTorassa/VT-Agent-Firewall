@@ -21,7 +21,7 @@ the one this project owns.
  ───────────────────────────────────┼──────────────────────────────────────────
  model output, spelled params,      │ normalized params, policy file,
  content the agent reads,           │ human approval on the terminal,
- MCP server results                 │ audit log (outside the sandbox), executor
+ MCP server results, tools/list     │ audit log (outside the sandbox), executor
 ```
 
 Spelled parameters never cross the boundary: the executor only receives what the
@@ -48,7 +48,7 @@ Status: **Implemented** (covered by tests or the demo), **Partial**, **Planned**
 |---|---|---|
 | LLM01 Prompt Injection | Containment, not detection: default-deny policy, protected paths, network deny, taint. The demo is an indirect injection. | Implemented (containment) |
 | LLM02 Sensitive Information Disclosure | Protected paths blocked after `realpath`; touching one taints the session and blocks every network action afterwards. | Partial (path-level taint) |
-| LLM03 Supply Chain | MCP registry: only listed server/tool pairs are callable. | Partial |
+| LLM03 Supply Chain | MCP registry (unlisted tools are hidden and blocked) and `--pin PATH=SHA256` for the server's code. | Partial |
 | LLM05 Improper Output Handling | Model output never reaches a shell: `shlex` to argv, `shell=False`, executor sees normalized params only. | Implemented |
 | LLM06 Excessive Agency | Default-deny per tool, shell allowlist and forbidden args, approval for out-of-scope writes, per-call tokens scoped to one audience and operation. | Implemented |
 | LLM10 Unbounded Consumption | Read cap (64 KB), shell and network timeouts. No rate limiting. | Partial |
@@ -61,7 +61,7 @@ Status: **Implemented** (covered by tests or the demo), **Partial**, **Planned**
 | ASI01 Agent Goal Hijack | Same containment as LLM01: a hijacked goal still has to pass the policy. | Implemented (containment) |
 | ASI02 Tool Misuse and Exploitation | Every tool call is a typed request with per-tool checks; unknown tools are denied. | Implemented |
 | ASI03 Identity and Privilege Abuse | Token broker: short-lived tokens scoped per call and audience, the agent never holds a refresh token, and the audit record ties each call to user, agent and token `jti`. Not sender-constrained yet (no DPoP). | Implemented |
-| ASI04 Agentic Supply Chain Vulnerabilities | MCP registry today; a real MCP proxy that pins the server it talks to is next. | Partial |
+| ASI04 Agentic Supply Chain Vulnerabilities | The MCP proxy hides and blocks unregistered tools and can refuse to start a server whose code does not match a pinned SHA-256. No signature verification of packages. | Partial |
 | ASI05 Unexpected Code Execution | Shell allowlist, forbidden arguments, argv path checks, `shell=False`. | Implemented |
 | ASI06 Memory and Context Poisoning | The gateway keeps no agent memory. | Out of scope |
 | ASI07 Insecure Inter-Agent Communication | Single agent only. | Out of scope |

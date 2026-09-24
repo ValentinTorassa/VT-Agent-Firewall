@@ -29,6 +29,10 @@ class Config:
         self.mcp_registry = {
             srv: set(tools) for srv, tools in raw.get("mcp_registry", {}).items()
         }
+        # MCP tool arguments that carry filesystem paths; they get the same
+        # protected-path check as fs.read, after realpath.
+        self.mcp_path_arguments = set(raw.get(
+            "mcp_path_arguments", ["path", "paths", "source", "destination"]))
         self.approval_timeout_sec = int(raw.get("approval_timeout_sec", 30))
         # audience -> operation -> {"scope": ..., "decision": allow|require_approval|block}
         self.apis = {

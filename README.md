@@ -90,14 +90,51 @@ works) and the same attack through the gateway (it is stopped):
 | Authentication mistaken for authorization | any live token may send or delete | the policy decides each operation before a token exists |
 | Confused deputy | a tool uses its own broad credential | the tool gets an exchanged token for one audience and scope |
 
+## MCP proxy
+
+`agent_firewall.mcp_proxy` puts the gateway in front of any stdio MCP server. The
+client launches the proxy as if it were the server; the proxy launches the real one:
+
+- every `tools/call` goes through the policy and the audit log; a blocked call never
+  reaches the server and the client gets `isError: true` naming the rule;
+- `tools/list` is filtered, so unregistered tools are not even shown to the model;
+- path arguments (`path`, `paths`, `source`, `destination`) get the same
+  protected-path check as `fs.read`, after `realpath`;
+- `--pin PATH=SHA256` refuses to start a server whose code changed;
+- approval never reads stdin (it is the MCP channel): it is denied unless
+  `--tty-approval` is set and a terminal is available.
+
+Example with the official filesystem server, as an entry in a client's MCP config:
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "vt-agent-firewall-mcp",
+      "args": ["--policy", "/path/to/policy.json", "--audit", "/path/to/mcp-audit.jsonl",
+               "--server-name", "filesystem", "--",
+               "npx", "-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"]
+    }
+  }
+}
+```
+
+Checked against `@modelcontextprotocol/server-filesystem` 0.2.0: of its 14 tools the
+model saw only the 3 registered ones, `read_text_file .env` was blocked, and
+`move_file` never reached the server. `tests/test_mcp_proxy.py` runs the same checks in
+CI against `examples/fs_mcp_server.py`, a deliberately naive server that does no path
+checking at all, so every block comes from the proxy.
+
 ## Layout
 
 ```text
 agent_firewall/   models, config, policy, executor, audit, approval, gateway,
-                  credentials (token broker), mock_apis
+                  credentials (token broker), mock_apis, mcp_proxy
 policies/         default.json: sandbox, protected paths, allowlists, MCP registry
 scripts/          run_demo.py, mock_receiver.py
-tests/            acceptance tests AC1–AC12; test_delegation.py (the four OAuth failure modes)
+examples/         fs_mcp_server.py (a naive MCP server for tests and demos)
+tests/            acceptance tests AC1–AC12, test_delegation.py (the four OAuth failure
+                  modes), test_mcp_proxy.py (a real MCP server over stdio)
 docs/             THREAT_MODEL.md; build-prompts/ (how the first version was scaffolded)
 demo_workspace/   synthetic sandbox for the demo
 ```
@@ -111,7 +148,9 @@ These are deliberate v0 boundaries, not hidden ones:
   content into an *allowed* channel is not detected.
 - **Allowed actions are audited after they run** (denials are audited before). A
   crash between execution and audit would leave an allowed action unrecorded.
-- **MCP is simulated** and the agent is a scripted list of requests.
+- **The demo agent is a scripted list of requests.** The MCP proxy is real; the demo
+  still uses the simulated `demo` MCP server.
+- **The MCP proxy handles one call at a time** and only covers stdio servers.
 - **Tokens are bearer tokens.** They are not sender-constrained (DPoP) yet: a stolen
   access token works for anyone until it expires, which is why it lives five minutes.
 - **The APIs are mocks** (`agent_firewall/mock_apis.py`) and the broker is in-process.
@@ -120,7 +159,7 @@ These are deliberate v0 boundaries, not hidden ones:
 
 1. ~~Token broker for delegated credentials, with tests for the four OAuth failure
    modes.~~ Done.
-2. A real MCP proxy (stdio) in front of an actual MCP server, replacing the simulation.
+2. ~~A real MCP proxy (stdio) in front of an actual MCP server.~~ Done.
 3. Release on PyPI as `vt-agent-firewall`.
 
 ## License

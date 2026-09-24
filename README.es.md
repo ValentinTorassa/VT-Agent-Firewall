@@ -112,6 +112,17 @@ queda abierto, refresh token como acceso permanente, autenticar vs autorizar, co
 deputy). Cada uno es un par: el patrón que se usa hoy, donde el ataque funciona, y el
 mismo ataque frenado por el gateway. Detalle en el [README en inglés](README.md#delegated-credentials-apicall).
 
+## Proxy MCP
+
+`agent_firewall.mcp_proxy` pone el gateway delante de cualquier servidor MCP por
+stdio: el cliente lanza el proxy como si fuera el servidor y el proxy lanza el real.
+Cada `tools/call` pasa por la política y la auditoría (lo bloqueado nunca llega al
+servidor), `tools/list` se filtra para que el modelo no vea herramientas no
+registradas, los argumentos de ruta pasan el mismo chequeo de paths protegidos que
+`fs.read`, y `--pin RUTA=SHA256` impide arrancar un servidor cuyo código cambió.
+Probado contra `@modelcontextprotocol/server-filesystem` 0.2.0. Configuración de
+ejemplo en el [README en inglés](README.md#mcp-proxy).
+
 ## Limitaciones v1 (explícitas)
 
 - Sin sandbox de OS: un agente con ejecución de código fuera del pipeline
