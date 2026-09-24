@@ -7,13 +7,52 @@
   "writable_dirs": [
     "demo_workspace/normal"
   ],
-  "shell_allowlist": ["ls", "grep", "cat", "head", "tail", "find", "wc"],
+  "shell_allowlist": [
+    "ls",
+    "grep",
+    "cat",
+    "head",
+    "tail",
+    "find",
+    "wc"
+  ],
   "shell_forbidden_args": {
-    "find": ["-exec", "-execdir", "-delete"]
+    "find": [
+      "-exec",
+      "-execdir",
+      "-delete"
+    ]
   },
-  "network": { "mode": "deny_all" },
+  "network": {
+    "mode": "deny_all"
+  },
   "mcp_registry": {
-    "demo": ["ping", "echo"]
+    "demo": [
+      "ping",
+      "echo"
+    ]
   },
-  "approval_timeout_sec": 30
+  "approval_timeout_sec": 30,
+  "apis": {
+    "calendar-api": {
+      "events.read": {
+        "scope": "calendar.read",
+        "decision": "allow"
+      },
+      "events.write": {
+        "scope": "calendar.write",
+        "decision": "require_approval"
+      }
+    },
+    "mail-api": {
+      "messages.read": {
+        "scope": "mail.read",
+        "decision": "allow"
+      },
+      "messages.send": {
+        "scope": "mail.send",
+        "decision": "require_approval"
+      }
+    }
+  }
 }

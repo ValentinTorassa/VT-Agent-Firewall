@@ -35,6 +35,7 @@ class PolicyEngine:
             "shell.run": self._shell_run,
             "net.request": self._net_request,
             "mcp.call": self._mcp_call,
+            "api.call": self._api_call,
         }.get(req.tool)
         if handler is None:
             return self._decide(req, Decision.BLOCK, "unknown-tool",
@@ -201,3 +202,44 @@ class PolicyEngine:
         return self._decide(req, Decision.BLOCK, "mcp-unknown-tool",
                             f"unregistered MCP tool: {server}/{tool}", "high",
                             normalized)
+
+    # -- api.call ---------------------------------------------------------------
+
+    def _api_call(self, req, session) -> PolicyDecision:
+        """Authorization per operation, independent of who the caller is.
+
+        A valid delegation says who the agent acts for; it does not say what it
+        may do. That is decided here, per audience and operation, before any
+        credential exists. The scope in `normalized` is the only one the
+        executor will ask the broker for.
+        """
+        audience = req.params["audience"]
+        operation = req.params["operation"]
+        arguments = req.params.get("arguments", {})
+        if not isinstance(audience, str) or not isinstance(operation, str) \
+                or not isinstance(arguments, dict):
+            raise TypeError("audience/operation must be strings, arguments a dict")
+        rule = self.cfg.apis.get(audience, {}).get(operation)
+        normalized = {"audience": audience, "operation": operation,
+                      "arguments": arguments,
+                      "scope": rule.get("scope") if rule else None}
+        if rule is None or not rule.get("scope"):
+            return self._decide(req, Decision.BLOCK, "api-unknown-operation",
+                                f"no policy for {audience}:{operation} (default-deny)",
+                                "high", normalized)
+        if session.tainted:
+            return self._decide(req, Decision.BLOCK, "taint-session",
+                                "session tainted by protected-path access; "
+                                "no outbound API calls", "high", normalized,
+                                matched=["api-policy", "taint-session"])
+        decision = {"allow": Decision.ALLOW,
+                    "require_approval": Decision.REQUIRE_APPROVAL}.get(
+                        rule.get("decision"), Decision.BLOCK)
+        rule_id = {Decision.ALLOW: "api-ok",
+                   Decision.REQUIRE_APPROVAL: "api-approval",
+                   Decision.BLOCK: "api-blocked"}[decision]
+        risk = {Decision.ALLOW: "low", Decision.REQUIRE_APPROVAL: "medium",
+                Decision.BLOCK: "high"}[decision]
+        return self._decide(req, decision, rule_id,
+                            f"{audience}:{operation} needs {rule['scope']} "
+                            f"({decision.value} by policy)", risk, normalized)

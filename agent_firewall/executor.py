@@ -17,6 +17,13 @@ NET_TIMEOUT_SEC = 5
 
 
 class Executor:
+    def __init__(self, broker=None, subject: str | None = None, apis=None,
+                 actor: str = "agent"):
+        self.broker = broker    # TokenBroker holding the user's delegation
+        self.subject = subject  # the user the agent acts for
+        self.apis = apis or {}  # audience -> resource server client
+        self.actor = actor
+
     def execute(self, tool: str, normalized: dict):
         return {
             "fs.read": self._fs_read,
@@ -24,6 +31,7 @@ class Executor:
             "shell.run": self._shell_run,
             "net.request": self._net_request,
             "mcp.call": self._mcp_call,
+            "api.call": self._api_call,
         }[tool](normalized)
 
     def _fs_read(self, n: dict) -> str:
@@ -58,3 +66,19 @@ class Executor:
         if n["tool"] == "echo":
             return str(n["arguments"].get("text", ""))
         return f"simulated result for {n['server']}/{n['tool']}"
+
+    def _api_call(self, n: dict) -> dict:
+        # The token is minted here, after the policy said yes, for exactly the
+        # audience and scope of this one call. It is used and dropped: only its
+        # claims (jti, scope, expiry) come back for the audit record.
+        if self.broker is None or self.subject is None:
+            raise RuntimeError("no credential broker configured")
+        api = self.apis.get(n["audience"])
+        if api is None:
+            raise RuntimeError(f"no client for audience {n['audience']!r}")
+        token = self.broker.exchange(
+            subject=self.subject, actor=self.actor,
+            tool=f"{n['audience']}:{n['operation']}",
+            audience=n["audience"], scopes={n["scope"]})
+        result = api.call(token.value, n["operation"], n["arguments"])
+        return {"result": result, "token": token.claims()}
