@@ -18,11 +18,12 @@ NET_TIMEOUT_SEC = 5
 
 class Executor:
     def __init__(self, broker=None, subject: str | None = None, apis=None,
-                 actor: str = "agent"):
+                 actor: str = "agent", mcp_backends=None):
         self.broker = broker    # TokenBroker holding the user's delegation
         self.subject = subject  # the user the agent acts for
         self.apis = apis or {}  # audience -> resource server client
         self.actor = actor
+        self.mcp_backends = mcp_backends or {}  # server name -> live MCP connection
 
     def execute(self, tool: str, normalized: dict):
         return {
@@ -59,7 +60,12 @@ class Executor:
         with urllib.request.urlopen(req, timeout=NET_TIMEOUT_SEC) as resp:
             return f"HTTP {resp.status}"
 
-    def _mcp_call(self, n: dict) -> str:
+    def _mcp_call(self, n: dict):
+        backend = self.mcp_backends.get(n["server"])
+        if backend is not None:
+            # A real server behind the MCP proxy: forward the approved call and
+            # return its MCP result object untouched.
+            return backend.call_tool(n["tool"], n["arguments"])
         # Simulated MCP server: registered tools only, no real side effects.
         if n["tool"] == "ping":
             return "pong"

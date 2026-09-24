@@ -194,13 +194,31 @@ class PolicyEngine:
         server = req.params["server"]
         tool = req.params["tool"]
         arguments = req.params.get("arguments", {})
+        if not isinstance(arguments, dict):
+            raise TypeError("MCP arguments must be an object")
         normalized = {"server": server, "tool": tool, "arguments": arguments}
-        if tool in self.cfg.mcp_registry.get(server, set()):
-            return self._decide(req, Decision.ALLOW, "mcp-ok",
-                                f"registered MCP tool: {server}/{tool}", "low",
+        if tool not in self.cfg.mcp_registry.get(server, set()):
+            return self._decide(req, Decision.BLOCK, "mcp-unknown-tool",
+                                f"unregistered MCP tool: {server}/{tool}", "high",
                                 normalized)
-        return self._decide(req, Decision.BLOCK, "mcp-unknown-tool",
-                            f"unregistered MCP tool: {server}/{tool}", "high",
+        # A registered tool is still not a free pass: path arguments are
+        # canonicalized and checked like fs.read, so `read_file ../.env`
+        # through an MCP filesystem server hits the same wall.
+        for key in sorted(self.cfg.mcp_path_arguments.intersection(arguments)):
+            values = arguments[key]
+            for spelled in values if isinstance(values, list) else [values]:
+                if not isinstance(spelled, str):
+                    raise TypeError(f"MCP path argument {key!r} must be a string")
+                resolved = self._resolve_path(spelled, self.cfg.sandbox_root)
+                if self.cfg.is_protected(resolved):
+                    session.tainted = True
+                    return self._decide(req, Decision.BLOCK, "mcp-protected-path",
+                                        f"{server}/{tool} argument {key!r} is a "
+                                        f"protected path: {resolved}", "high",
+                                        normalized,
+                                        matched=["mcp-protected-path", "fs-protected"])
+        return self._decide(req, Decision.ALLOW, "mcp-ok",
+                            f"registered MCP tool: {server}/{tool}", "low",
                             normalized)
 
     # -- api.call ---------------------------------------------------------------

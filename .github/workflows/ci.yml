@@ -27,3 +27,4 @@ jobs:
         run: |
           python -m pip install --quiet .
           cd /tmp && python -c "import agent_firewall; print(agent_firewall.__all__)"
+          vt-agent-firewall-mcp --help

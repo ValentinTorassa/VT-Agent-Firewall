@@ -24,6 +24,9 @@ classifiers = [
 ]
 dependencies = []
 
+[project.scripts]
+vt-agent-firewall-mcp = "agent_firewall.mcp_proxy:main"
+
 [project.urls]
 Repository = "https://github.com/ValentinTorassa/VT-Agent-Firewall"
 Issues = "https://github.com/ValentinTorassa/VT-Agent-Firewall/issues"
