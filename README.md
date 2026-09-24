@@ -21,7 +21,9 @@ Three possible decisions: `allow`, `block`, `require_approval`. If a parser fail
 the audit store is unavailable, the answer is `block`: the gateway would rather stop
 than act unaudited.
 
-**Status: alpha (0.1.0.dev0).** Standard library only, Python 3.11+. Built as the
+![The same prompt-injected agent without the gateway (the fake key is exfiltrated) and through it (every attempt blocked and audited)](docs/demo.gif)
+
+**Status: alpha (0.1.0).** Standard library only, Python 3.11+. Built as the
 reference implementation for the talk *"Dónde se rompe OAuth cuando el que llama es
 un agente"* (OWASP Village, Ekoparty 2026). Not production-ready; see
 [Limitations](#limitations).
@@ -29,7 +31,9 @@ un agente"* (OWASP Village, Ekoparty 2026). Not production-ready; see
 ## Quickstart
 
 ```bash
-git clone https://github.com/ValentinTorassa/VT-Agent-Firewall
+pip install "git+https://github.com/ValentinTorassa/VT-Agent-Firewall@v0.1.0"   # library + vt-agent-firewall-mcp
+
+git clone https://github.com/ValentinTorassa/VT-Agent-Firewall   # to run the demo and tests
 cd VT-Agent-Firewall
 python3 scripts/run_demo.py --health       # static sanity checks
 python3 scripts/run_demo.py                # the attack, through the gateway
@@ -155,12 +159,16 @@ These are deliberate v0 boundaries, not hidden ones:
   access token works for anyone until it expires, which is why it lives five minutes.
 - **The APIs are mocks** (`agent_firewall/mock_apis.py`) and the broker is in-process.
 
-## Roadmap to v0.1.0
+## Roadmap
 
-1. ~~Token broker for delegated credentials, with tests for the four OAuth failure
-   modes.~~ Done.
-2. ~~A real MCP proxy (stdio) in front of an actual MCP server.~~ Done.
-3. Release on PyPI as `vt-agent-firewall`.
+v0.1.0 shipped the gateway, the token broker with the four OAuth failure modes, and
+the MCP proxy ([CHANGELOG](CHANGELOG.md)). Next:
+
+1. Sender-constrained tokens (DPoP), so a stolen access token is useless.
+2. Content-level taint, not only per path.
+3. Concurrent calls and the Streamable HTTP transport in the MCP proxy.
+4. A reproducible corpus of injection attacks to use as a benchmark.
+5. PyPI release (`vt-agent-firewall`), see [RELEASING.md](RELEASING.md).
 
 ## License
 
