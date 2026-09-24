@@ -21,8 +21,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from gateway import ActionRequest, Gateway  # noqa: E402
-from gateway.executor import Executor  # noqa: E402
+from agent_firewall import ActionRequest, Gateway  # noqa: E402
+from agent_firewall.executor import Executor  # noqa: E402
 from scripts.mock_receiver import start_receiver  # noqa: E402
 
 CONFIG = "policies/default.json"

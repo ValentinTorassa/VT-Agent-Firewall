@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vt-agent-firewall"
+version = "0.1.0.dev0"
+description = "A fail-closed gateway between an AI agent and its tools: normalize, default-deny policy, human approval, append-only audit."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+authors = [{ name = "Valentín Torassa Colombero" }]
+keywords = ["ai-agents", "llm-security", "prompt-injection", "mcp", "owasp", "policy-engine"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+]
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/ValentinTorassa/VT-Agent-Firewall"
+Issues = "https://github.com/ValentinTorassa/VT-Agent-Firewall/issues"
+
+[tool.setuptools]
+packages = ["agent_firewall"]
