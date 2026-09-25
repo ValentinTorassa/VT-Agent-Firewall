@@ -31,7 +31,7 @@ un agente"* (OWASP Village, Ekoparty 2026). Not production-ready; see
 ## Quickstart
 
 ```bash
-pip install "git+https://github.com/ValentinTorassa/VT-Agent-Firewall@v0.1.0"   # library + vt-agent-firewall-mcp
+pip install vt-agent-firewall   # library + vt-agent-firewall-mcp (PyPI)
 
 git clone https://github.com/ValentinTorassa/VT-Agent-Firewall   # to run the demo and tests
 cd VT-Agent-Firewall
@@ -168,7 +168,6 @@ the MCP proxy ([CHANGELOG](CHANGELOG.md)). Next:
 2. Content-level taint, not only per path.
 3. Concurrent calls and the Streamable HTTP transport in the MCP proxy.
 4. A reproducible corpus of injection attacks to use as a benchmark.
-5. PyPI release (`vt-agent-firewall`), see [RELEASING.md](RELEASING.md).
 
 ## License
 
