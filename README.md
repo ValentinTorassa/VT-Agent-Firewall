@@ -39,6 +39,7 @@ python3 scripts/run_demo.py --health       # static sanity checks
 python3 scripts/run_demo.py                # the attack, through the gateway
 python3 scripts/run_demo.py --no-firewall  # contrast: the same attack without it
 python3 -m unittest discover -s tests -v   # AC1–AC12 + the four OAuth failure modes
+python3 scripts/run_corpus.py                # 8 isolated synthetic injection cases
 ```
 
 ## The demo
@@ -159,6 +160,15 @@ These are deliberate v0 boundaries, not hidden ones:
   access token works for anyone until it expires, which is why it lives five minutes.
 - **The APIs are mocks** (`agent_firewall/mock_apis.py`) and the broker is in-process.
 
+## Reproducible attack corpus
+
+`corpus/attacks.json` records eight synthetic untrusted instructions, their
+resulting tool requests and the expected decision and rule. `scripts/run_corpus.py`
+gives each case a fresh temporary workspace and gateway session, checks every
+decision and audit record, and verifies that the canary was not changed. The
+corpus tests policy behavior; it does not measure whether a language model would
+follow an instruction. Add cases with synthetic data only.
+
 ## Roadmap
 
 v0.1.0 shipped the gateway, the token broker with the four OAuth failure modes, and
@@ -167,7 +177,7 @@ the MCP proxy ([CHANGELOG](CHANGELOG.md)). Next:
 1. Sender-constrained tokens (DPoP), so a stolen access token is useless.
 2. Content-level taint, not only per path.
 3. Concurrent calls and the Streamable HTTP transport in the MCP proxy.
-4. A reproducible corpus of injection attacks to use as a benchmark.
+4. Expand the synthetic corpus and add a separate model-following benchmark.
 
 ## License
 
