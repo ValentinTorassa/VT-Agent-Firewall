@@ -35,7 +35,8 @@ class AuditLogger:
 
     def poison(self, record: dict) -> None:
         """Last-resort channel when the audit store itself fails mid-run."""
-        print(f"AUDIT-STORE FAILURE, unaudited record: {record}", file=sys.stderr)
+        print("AUDIT-STORE FAILURE: outcome unknown; action_id="
+              f"{record.get('action_id', 'unknown')}", file=sys.stderr)
 
     def close(self) -> None:
         self._fh.close()

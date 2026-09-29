@@ -46,8 +46,14 @@ def run_corpus() -> list[str]:
                 if gateway.audit is not None:
                     gateway.audit.close()
             records = (temp / "audit.jsonl").read_text(encoding="utf-8").splitlines()
-            if len(records) != len(case["steps"]):
-                failures.append(f"{case['id']}: audit has {len(records)} records, expected {len(case['steps'])}")
+            expected = sum(2 if step["decision"] == "allow" else 1 for step in case["steps"])
+            if len(records) != expected:
+                failures.append(f"{case['id']}: audit has {len(records)} records, expected {expected}")
+            parsed = [json.loads(record) for record in records]
+            for index, record in enumerate(parsed):
+                if record["outcome"] == "intent":
+                    if index + 1 >= len(parsed) or parsed[index + 1].get("action_id") != record.get("action_id"):
+                        failures.append(f"{case['id']}: unresolved audit intent")
             if (temp / "demo_workspace/canary/must-remain.txt").read_text() != "untouched\n":
                 failures.append(f"{case['id']}: canary changed")
     return failures

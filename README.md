@@ -151,8 +151,9 @@ These are deliberate v0 boundaries, not hidden ones:
 - **No OS sandbox.** An agent that can run code outside the pipeline bypasses it.
 - **Taint is per path, not per content.** Reading an *allowed* file and pasting its
   content into an *allowed* channel is not detected.
-- **Allowed actions are audited after they run** (denials are audited before). A
-  crash between execution and audit would leave an allowed action unrecorded.
+- **Allowed actions have a durable intent before execution and an outcome after.**
+  A crash between them leaves an unresolved intent that needs reconciliation; the
+  gateway cannot prove from that record alone whether the external action happened.
 - **The demo agent is a scripted list of requests.** The MCP proxy is real; the demo
   still uses the simulated `demo` MCP server.
 - **The MCP proxy handles one call at a time** and only covers stdio servers.
@@ -162,12 +163,17 @@ These are deliberate v0 boundaries, not hidden ones:
 
 ## Reproducible attack corpus
 
-`corpus/attacks.json` records eight synthetic untrusted instructions, their
+`corpus/attacks.json` records twelve synthetic untrusted instructions, their
 resulting tool requests and the expected decision and rule. `scripts/run_corpus.py`
 gives each case a fresh temporary workspace and gateway session, checks every
 decision and audit record, and verifies that the canary was not changed. The
 corpus tests policy behavior; it does not measure whether a language model would
-follow an instruction. Add cases with synthetic data only.
+follow an instruction. `scripts/score_model_following.py reviewed-trace.jsonl`
+scores separately reviewed model continuations. Each JSONL row names a corpus
+`case_id`, `model`, `attacker_goal_attempted` (`true`, `false`, or `null`) and a
+list of observed `tool_calls` names. Missing and uncertain cases stay visible;
+neither counts as resistance. This scorer does not run a model or infer its intent.
+Keep traces synthetic and do not include raw prompts, tool arguments, or secrets.
 
 ## Roadmap
 
