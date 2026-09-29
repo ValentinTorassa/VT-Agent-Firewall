@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import sys
 import time
+import uuid
 from pathlib import Path
 
 from .approval import TerminalApprover
@@ -81,6 +82,14 @@ class Gateway:
             # Audit-first: the attempt is recorded before we return.
             return self._record(decision, outcome="not_executed"), None
 
+        action_id = uuid.uuid4().hex
+        try:
+            # fsync the intent before dispatch. A crash thereafter leaves an
+            # explicit unresolved action rather than an invisible side effect.
+            self._record(decision, outcome="intent", action_id=action_id, strict=True)
+        except AuditUnavailable:
+            return self._unrecorded_block(decision, action_id), None
+
         try:
             result = self.executor.execute(decision.request.tool,
                                            decision.normalized)
@@ -90,12 +99,24 @@ class Gateway:
                 # never the bearer value), then preview the API's answer.
                 extra["token"] = result["token"]
                 result = result["result"]
-            return self._record(decision, outcome="executed",
+            return self._record(decision, outcome="executed", action_id=action_id,
                                 result_preview=str(result)[:200], **extra), result
         except Exception as e:  # executor errors are audited, not hidden
-            return self._record(decision, outcome="error", error=str(e)), None
+            return self._record(decision, outcome="error", action_id=action_id,
+                                error=str(e)), None
 
-    def _record(self, decision: PolicyDecision, outcome: str, **extra) -> dict:
+    def _unrecorded_block(self, decision: PolicyDecision, action_id: str) -> dict:
+        return {
+            "correlation_id": decision.request.correlation_id,
+            "action_id": action_id,
+            "decision": Decision.BLOCK.value,
+            "rule_id": "fail-closed",
+            "reason": "audit intent unavailable; refusing to execute",
+            "outcome": "not_executed",
+        }
+
+    def _record(self, decision: PolicyDecision, outcome: str,
+                strict: bool = False, **extra) -> dict:
         record = {
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "correlation_id": decision.request.correlation_id,
@@ -114,11 +135,14 @@ class Gateway:
         if self.audit is not None:
             try:
                 self.audit.log(record)
-            except OSError as e:
-                # We acted but could not audit: poison the gateway.
+            except Exception as e:
+                # Before dispatch, strict mode blocks execution. After dispatch,
+                # the durable intent remains and the outcome is unresolved.
                 self._broken = True
                 self.audit.poison(record)
                 print(f"FAIL-CLOSED from now on: {e}", file=sys.stderr)
+                if strict:
+                    raise AuditUnavailable("audit intent unavailable") from e
         return record
 
     @staticmethod

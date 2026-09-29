@@ -213,7 +213,7 @@ class TestNetworkAndMcp(GatewayTestBase):
 
 
 class TestAuditAndFailClosed(GatewayTestBase):
-    def test_ac10_every_request_produces_exactly_one_record(self):
+    def test_ac10_allowed_request_has_intent_and_outcome(self):
         requests = [
             self.req("fs.read", path="normal/notes.txt"),
             self.req("fs.read", path=".env"),
@@ -224,12 +224,32 @@ class TestAuditAndFailClosed(GatewayTestBase):
         for r in requests:
             self.gw.handle(r)
         logged = self.records()
-        self.assertEqual(len(logged), len(requests))
-        self.assertEqual([l["correlation_id"] for l in logged], ids)
+        self.assertEqual(len(logged), len(requests) + 1)
+        self.assertEqual([l["correlation_id"] for l in logged], [ids[0], *ids])
+        self.assertEqual([l["outcome"] for l in logged[:2]], ["intent", "executed"])
+        self.assertEqual(logged[0]["action_id"], logged[1]["action_id"])
         for l in logged:
             for key in ("ts", "actor", "tool", "normalized", "rule_id",
                         "decision", "outcome"):
                 self.assertIn(key, l)
+
+    def test_failed_intent_write_blocks_before_executor(self):
+        called = []
+        self.gw.executor.execute = lambda *args: called.append(args)
+        self.gw.audit.log = lambda record: (_ for _ in ()).throw(OSError("synthetic full disk"))
+        result = self.gw.handle(self.req("fs.read", path="normal/notes.txt"))
+        self.assertEqual((result["decision"], result["rule_id"], result["outcome"]),
+                         ("block", "fail-closed", "not_executed"))
+        self.assertEqual(called, [])
+
+    def test_crash_after_intent_leaves_reconcilable_record(self):
+        self.gw.executor.execute = lambda *args: (_ for _ in ()).throw(KeyboardInterrupt())
+        with self.assertRaises(KeyboardInterrupt):
+            self.gw.handle(self.req("fs.read", path="normal/notes.txt"))
+        records = self.records()
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["outcome"], "intent")
+        self.assertRegex(records[0]["action_id"], r"^[0-9a-f]{32}$")
 
     def test_ac11_unwritable_audit_store_fails_closed(self):
         blocked_dir = self.tmp / "nowrite"

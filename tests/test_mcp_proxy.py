@@ -139,16 +139,16 @@ class TestMcpProxy(unittest.TestCase):
         self.assertIn("mcp-unknown-tool", result["content"][0]["text"])
         self.assertTrue((self.ws / "canary" / "must-remain.txt").exists())
 
-    def test_every_tool_call_is_audited_once_with_its_rule(self):
+    def test_allowed_call_has_intent_and_outcome_while_blocks_have_one_record(self):
         client = self.start()
         client.call("read_file", path="normal/notes.txt")
         client.call("read_file", path=".env")
         client.call("write_file", path="normal/x.txt", content="x")
         client.close()
         rules = [r["rule_id"] for r in self.audit_records()]
-        self.assertEqual(rules, ["mcp-ok", "mcp-protected-path", "mcp-unknown-tool"])
+        self.assertEqual(rules, ["mcp-ok", "mcp-ok", "mcp-protected-path", "mcp-unknown-tool"])
         self.assertEqual([r["outcome"] for r in self.audit_records()],
-                         ["executed", "not_executed", "not_executed"])
+                         ["intent", "executed", "not_executed", "not_executed"])
 
     def test_malformed_arguments_fail_closed(self):
         client = self.start()

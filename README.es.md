@@ -129,8 +129,9 @@ ejemplo en el [README en inglés](README.md#mcp-proxy).
   saltea todo.
 - Taint es por path, no por contenido: leer un archivo *permitido* y pegar
   su contenido en un canal *permitido* no se detecta.
-- Acciones allowed: se auditan después de ejecutar (denies se auditan antes).
-  Un crash entre ejecución y audit dejaría una acción allowed sin registro.
+- Las acciones permitidas dejan un intento durable antes de ejecutarse y un
+  resultado después. Si hay un crash entre ambos, el intento queda pendiente de
+  conciliación: por sí solo no prueba si ocurrió la acción externa.
 - Sin análisis semántico de comandos, DoS, ni carreras TOCTOU.
 
 ## Prompts
