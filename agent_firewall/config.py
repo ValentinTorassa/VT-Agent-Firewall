@@ -50,6 +50,9 @@ class Config:
         # Extra JSON-RPC methods the MCP proxy relays untouched (the standard
         # ones are built in; anything else is refused).
         self.mcp_relay_methods = set(raw.get("mcp_relay_methods", []))
+        # Audit records keep a hash and length of written content and a short
+        # preview of network bodies unless verbose audit is turned on.
+        self.audit_verbose = bool(raw.get("audit", {}).get("verbose", False))
         self.approval_timeout_sec = int(raw.get("approval_timeout_sec", 30))
         # audience -> operation -> {"scope": ..., "decision": allow|require_approval|block}
         self.apis = {

@@ -236,6 +236,34 @@ class TestMcpArguments(BypassBase):
         self.assertBlocked(r, "mcp-resources-denied")
 
 
+class TestAuditMinimization(BypassBase):
+    def test_written_content_is_hashed_and_bodies_truncated(self):
+        content = "line with synthetic secret material\n" * 3
+        r = self.gw.handle(ActionRequest(actor="test", tool="fs.write", params={
+            "path": "normal/out.txt", "content": content}))
+        self.assertAllowed(r)
+        self.assertEqual((self.ws / "normal" / "out.txt").read_text(), content)
+        log = self.audit_path.read_text()
+        self.assertNotIn("synthetic secret material", log)
+        for record in map(json.loads, log.splitlines()):
+            self.assertEqual(record["spelled_params"]["content"]["bytes"],
+                             len(content.encode()))
+            self.assertRegex(record["normalized"]["content"]["sha256"], "^[0-9a-f]{64}$")
+        body = "B" * 500
+        net = self.gw.handle(ActionRequest(actor="test", tool="net.request", params={
+            "url": "http://127.0.0.1:9/x", "method": "POST", "body": body}))
+        self.assertLess(len(net["spelled_params"]["body"]), 100)
+        self.assertEqual(net["spelled_params"]["body_digest"]["bytes"], 500)
+
+    def test_verbose_audit_keeps_the_content(self):
+        gw = Gateway(self.config_path, self.tmp / "verbose.jsonl",
+                     base_dir=self.tmp, audit_verbose=True)
+        r = gw.handle(ActionRequest(actor="test", tool="fs.write", params={
+            "path": "normal/v.txt", "content": "kept"}))
+        gw.audit.close()
+        self.assertEqual(r["spelled_params"]["content"], "kept")
+
+
 class TestExecutorStdin(unittest.TestCase):
     def test_a_command_without_file_operands_does_not_read_our_stdin(self):
         # `grep foo` with no file reads stdin. In the MCP proxy stdin is the

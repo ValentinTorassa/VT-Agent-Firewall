@@ -2,15 +2,22 @@
 
 Ordering invariants:
 - Denied actions are audited BEFORE returning; they never execute.
-- Allowed actions execute and are then audited with their outcome. If the
-  audit write fails, the gateway poisons itself and denies everything
-  afterwards (fail-closed).
-- If the audit store cannot even be opened at startup, every request is
-  denied with `fail-closed`.
+- Allowed actions get a durable `intent` record (fsynced, with an action_id)
+  BEFORE dispatch, then an `executed` or `error` record with the same
+  action_id. If the intent cannot be written, the action is not dispatched.
+  A crash between the two leaves an unresolved intent, never an invisible
+  side effect.
+- If any audit write fails, the gateway poisons itself and denies everything
+  afterwards (fail-closed). If the audit store cannot even be opened at
+  startup, every request is denied with `fail-closed`.
+- Audit records keep a SHA-256 and length for written content and at most a
+  short preview of network bodies, unless verbose audit is enabled.
 """
 
 from __future__ import annotations
 
+import copy
+import hashlib
 import sys
 import time
 import uuid
@@ -29,8 +36,12 @@ class Gateway:
     def __init__(self, config_path: str | Path, audit_path: str | Path,
                  approver=None, base_dir: str | Path | None = None,
                  broker=None, subject: str | None = None, apis=None,
-                 mcp_backends=None):
+                 mcp_backends=None, audit_verbose: bool | None = None):
         self.config = Config(config_path, base_dir=base_dir)
+        # Verbose audit keeps written content and bodies in full: for local
+        # debugging only, never for a shared log.
+        self.audit_verbose = (self.config.audit_verbose if audit_verbose is None
+                              else audit_verbose)
         self.policy = PolicyEngine(self.config)
         # broker/subject/apis enable `api.call`: delegated credentials minted
         # per call. Without them every api.call fails closed in the executor.
@@ -122,8 +133,10 @@ class Gateway:
             "correlation_id": decision.request.correlation_id,
             "actor": decision.request.actor,
             "tool": decision.request.tool,
-            "spelled_params": decision.request.params,
-            "normalized": decision.normalized,
+            "spelled_params": self._audit_view(decision.request.tool,
+                                               decision.request.params),
+            "normalized": self._audit_view(decision.request.tool,
+                                           decision.normalized),
             "decision": decision.decision.value,
             "rule_id": decision.rule_id,
             "rules_matched": decision.rules_matched,
@@ -144,6 +157,23 @@ class Gateway:
                 if strict:
                     raise AuditUnavailable("audit intent unavailable") from e
         return record
+
+    BODY_PREVIEW_CHARS = 64
+
+    def _audit_view(self, tool: str, params):
+        """What the audit log keeps of a request's params. The executor still
+        gets the real ones; only the record is minimized."""
+        if self.audit_verbose or not isinstance(params, dict):
+            return params
+        view = copy.deepcopy(params)
+        if tool == "fs.write" and isinstance(view.get("content"), str):
+            view["content"] = _digest(view["content"])
+        if tool == "net.request" and isinstance(view.get("body"), str):
+            body = view["body"]
+            if len(body) > self.BODY_PREVIEW_CHARS:
+                view["body"] = body[:self.BODY_PREVIEW_CHARS] + "…"
+                view["body_digest"] = _digest(body)
+        return view
 
     @staticmethod
     def health_check(config_path: str | Path = "policies/default.json",
@@ -167,3 +197,8 @@ class Gateway:
         ok.append("network: deny_all")
         ok.append(f"mcp registry: {sorted(cfg.mcp_registry)}")
         return ok
+
+
+def _digest(text: str) -> dict:
+    data = text.encode("utf-8", errors="replace")
+    return {"sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)}
