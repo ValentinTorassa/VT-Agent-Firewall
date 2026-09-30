@@ -199,6 +199,43 @@ class TestProtectedDirectory(BypassBase):
         self.assertFalse((self.ws / "canary" / "new.txt").exists())
 
 
+class TestMcpArguments(BypassBase):
+    def test_path_arguments_must_stay_in_the_sandbox(self):
+        # 0.1.0: absolute and ../ paths passed; only protected ones were checked.
+        for arguments in ({"path": "/etc/hostname"},
+                          {"path": "../../outside"},
+                          {"path": "file:///etc/hostname"},
+                          {"paths": ["normal/notes.txt", "/etc/passwd"]},
+                          {"query": "~/.ssh/id_rsa"}):
+            with self.subTest(arguments=arguments):
+                self.assertBlocked(self.mcp("read_file", arguments), "mcp-sandbox")
+
+    def test_any_argument_name_that_carries_a_path_is_checked(self):
+        # 0.1.0: only path, paths, source and destination were checked.
+        for arguments in ({"file": ".env"},
+                          {"name": ".env"},  # exists under the root
+                          {"options": {"target": "malicious_repo/config-link"}},
+                          {"uri": f"file://{self.ws / '.env'}"},
+                          {"paths": ["normal/notes.txt", "fake_credentials.txt"]}):
+            with self.subTest(arguments=arguments):
+                self.assertBlocked(self.mcp("read_file", arguments), "mcp-protected-path")
+        self.assertTrue(self.gw.session.tainted)
+
+    def test_plain_text_arguments_pass(self):
+        self.assertAllowed(self.mcp("echo", {"text": "hello world"}, server="demo"))
+        self.assertAllowed(self.mcp("echo", {"text": "see https://example.com/x"},
+                                    server="demo"))
+
+    def test_non_string_path_argument_fails_closed(self):
+        r = self.mcp("read_file", {"path": 7})
+        self.assertBlocked(r, "parse-error")
+
+    def test_resources_are_denied_by_default(self):
+        r = self.gw.handle(ActionRequest(actor="test", tool="mcp.resource", params={
+            "server": "fs", "uri": "file:///etc/hostname"}))
+        self.assertBlocked(r, "mcp-resources-denied")
+
+
 class TestExecutorStdin(unittest.TestCase):
     def test_a_command_without_file_operands_does_not_read_our_stdin(self):
         # `grep foo` with no file reads stdin. In the MCP proxy stdin is the

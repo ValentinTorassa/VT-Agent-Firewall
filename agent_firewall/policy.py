@@ -41,6 +41,7 @@ class PolicyEngine:
             "shell.run": self._shell_run,
             "net.request": self._net_request,
             "mcp.call": self._mcp_call,
+            "mcp.resource": self._mcp_resource,
             "api.call": self._api_call,
         }.get(req.tool)
         if handler is None:
@@ -282,25 +283,95 @@ class PolicyEngine:
             return self._decide(req, Decision.BLOCK, "mcp-unknown-tool",
                                 f"unregistered MCP tool: {server}/{tool}", "high",
                                 normalized)
-        # A registered tool is still not a free pass: path arguments are
-        # canonicalized and checked like fs.read, so `read_file ../.env`
-        # through an MCP filesystem server hits the same wall.
-        for key in sorted(self.cfg.mcp_path_arguments.intersection(arguments)):
-            values = arguments[key]
-            for spelled in values if isinstance(values, list) else [values]:
-                if not isinstance(spelled, str):
-                    raise TypeError(f"MCP path argument {key!r} must be a string")
-                resolved = self._resolve_path(spelled, self.cfg.sandbox_root)
-                if self.cfg.is_protected(resolved):
-                    session.tainted = True
-                    return self._decide(req, Decision.BLOCK, "mcp-protected-path",
-                                        f"{server}/{tool} argument {key!r} is a "
-                                        f"protected path: {resolved}", "high",
-                                        normalized,
-                                        matched=["mcp-protected-path", "fs-protected"])
+        # A registered tool is still not a free pass. Every string argument
+        # that is a known path name, or looks like a path, or exists under the
+        # server's root is canonicalized and checked like fs.read, so
+        # `read_file ../.env` through an MCP filesystem server hits the same wall.
+        base = self.cfg.mcp_roots.get(server, self.cfg.sandbox_root)
+        for key, spelled in self._mcp_strings(arguments):
+            if not (key in self.cfg.mcp_path_arguments
+                    or self._looks_like_path(spelled, base)):
+                continue
+            blocked = self._mcp_check_path(req, session, normalized, server,
+                                           f"{tool} argument {key!r}", spelled, base)
+            if blocked:
+                return blocked
         return self._decide(req, Decision.ALLOW, "mcp-ok",
                             f"registered MCP tool: {server}/{tool}", "low",
                             normalized)
+
+    def _mcp_resource(self, req, session) -> PolicyDecision:
+        server = req.params["server"]
+        uri = req.params["uri"]
+        if not isinstance(uri, str):
+            raise TypeError("resource uri must be a string")
+        normalized = {"server": server, "uri": uri}
+        if server not in self.cfg.mcp_resources:
+            return self._decide(req, Decision.BLOCK, "mcp-resources-denied",
+                                f"resources are not enabled for {server} "
+                                f"(default-deny)", "high", normalized)
+        if uri.startswith("file:"):
+            base = self.cfg.mcp_roots.get(server, self.cfg.sandbox_root)
+            blocked = self._mcp_check_path(req, session, normalized, server,
+                                           "resource", uri, base)
+            if blocked:
+                return blocked
+        return self._decide(req, Decision.ALLOW, "mcp-resource-ok",
+                            f"resource read enabled for {server}", "low", normalized)
+
+    def _mcp_check_path(self, req, session, normalized, server, what, spelled, base):
+        if not isinstance(spelled, str):
+            raise TypeError(f"MCP path argument {what} must be a string")
+        resolved = self._resolve_path(self._strip_file_uri(spelled), base)
+        if self.cfg.is_protected(resolved):
+            session.tainted = True
+            return self._decide(req, Decision.BLOCK, "mcp-protected-path",
+                                f"{server}/{what} is a protected path: {resolved}",
+                                "high", normalized,
+                                matched=["mcp-protected-path", "fs-protected"])
+        if not self.cfg.in_sandbox(resolved):
+            return self._decide(req, Decision.BLOCK, "mcp-sandbox",
+                                f"{server}/{what} escapes the sandbox: {resolved}",
+                                "high", normalized)
+        return None
+
+    def _mcp_strings(self, value, key: str = ""):
+        """(key, string) for every string in nested arguments. Values under a
+        known path key must be strings (or lists of them): anything else is a
+        malformed request."""
+        if isinstance(value, dict):
+            for k, v in value.items():
+                if k in self.cfg.mcp_path_arguments and not isinstance(v, (str, list)):
+                    raise TypeError(f"MCP path argument {k!r} must be a string")
+                yield from self._mcp_strings(v, k)
+        elif isinstance(value, list):
+            for v in value:
+                if key in self.cfg.mcp_path_arguments and not isinstance(v, str):
+                    raise TypeError(f"MCP path argument {key!r} must be a string")
+                yield from self._mcp_strings(v, key)
+        elif isinstance(value, str):
+            yield key, value
+
+    @staticmethod
+    def _strip_file_uri(spelled: str) -> str:
+        if spelled.startswith("file://"):
+            return urlparse(spelled).path or "/"
+        if spelled.startswith("file:"):
+            return spelled[len("file:"):]
+        return os.path.expanduser(spelled) if spelled.startswith("~") else spelled
+
+    @staticmethod
+    def _looks_like_path(spelled: str, base: Path) -> bool:
+        if not spelled or len(spelled) > 4096 or "\0" in spelled:
+            return False
+        if spelled.startswith(("file:", "/", "./", "../", "~")) or spelled in (".", ".."):
+            return True
+        if "/" in spelled and "://" not in spelled and not any(c.isspace() for c in spelled):
+            return True
+        try:
+            return os.path.lexists(base / spelled)
+        except (OSError, ValueError):
+            return False
 
     # -- api.call ---------------------------------------------------------------
 

@@ -156,6 +156,45 @@ class TestMcpProxy(unittest.TestCase):
         self.assertTrue(reply["result"]["isError"])
         self.assertIn("parse-error", reply["result"]["content"][0]["text"])
 
+    def test_paths_outside_the_sandbox_are_blocked(self):
+        client = self.start()
+        for arguments in ({"path": "/etc/hostname"}, {"path": "../../outside"},
+                          {"path": "file:///etc/hostname"}):
+            result = client.call("read_file", **arguments)
+            self.assertTrue(result["isError"], arguments)
+            self.assertIn("mcp-sandbox", result["content"][0]["text"], arguments)
+
+    def test_a_batch_is_rejected_and_the_proxy_keeps_working(self):
+        # 0.1.0: a JSON array crashed the dispatch loop and took the proxy down.
+        client = self.start()
+        client.send([{"jsonrpc": "2.0", "id": 90, "method": "tools/call",
+                      "params": {"name": "read_file", "arguments": {"path": ".env"}}}])
+        reply = client.lines.get(timeout=TIMEOUT)
+        self.assertEqual(reply["error"]["code"], -32600)
+        self.assertEqual(client.request("ping")["result"], {})
+
+    def test_a_tool_call_sent_as_a_notification_never_reaches_the_server(self):
+        client = self.start()
+        client.send({"jsonrpc": "2.0", "method": "tools/call",
+                     "params": {"name": "read_file", "arguments": {"path": ".env"}}})
+        self.assertEqual(client.request("ping")["result"], {})
+        self.assertIn("dropped tools/call sent as a notification", client.close())
+
+    def test_resources_are_denied_by_default(self):
+        client = self.start()
+        reply = client.request("resources/read", {"uri": f"file://{self.ws / '.env'}"})
+        self.assertIn("mcp-resources-denied", reply["error"]["message"])
+        self.assertNotIn("fake-synthetic-key", json.dumps(reply))
+        self.assertEqual(client.request("resources/list")["result"], {"resources": []})
+        client.close()
+        self.assertEqual([r["rule_id"] for r in self.audit_records()],
+                         ["mcp-resources-denied"])
+
+    def test_unknown_methods_are_not_relayed(self):
+        client = self.start()
+        reply = client.request("files/read_everything", {"path": ".env"})
+        self.assertEqual(reply["error"]["code"], -32601)
+
     def test_pin_mismatch_refuses_to_start_the_server(self):
         proc = subprocess.run([
             sys.executable, "-m", "agent_firewall.mcp_proxy",
