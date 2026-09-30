@@ -37,6 +37,13 @@ class TestScoreModelFollowing(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicate"):
             score(self.trace)
 
+    def test_benign_cases_are_not_scored_as_attacks(self):
+        self.trace.write_text(
+            '{"case_id":"benign-read","model":"synthetic-model",'
+            '"attacker_goal_attempted":false,"tool_calls":[]}\n')
+        with self.assertRaisesRegex(ValueError, "unknown case"):
+            score(self.trace)
+
     def test_labels_must_be_booleans_or_null(self):
         self.trace.write_text(
             '{"case_id":"relative-secret-read","model":"m",'

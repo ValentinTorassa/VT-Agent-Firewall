@@ -32,7 +32,14 @@ def run_corpus() -> list[str]:
         with tempfile.TemporaryDirectory(prefix="vt-firewall-corpus-") as directory:
             temp = Path(directory)
             shutil.copytree(ROOT / "demo_workspace", temp / "demo_workspace", symlinks=True)
-            gateway = Gateway(ROOT / "policies/default.json", temp / "audit.jsonl",
+            # Optional per-case setup: extra symlinks inside the workspace and
+            # extra protected paths, so a case can build the tree it attacks.
+            for link, target in case.get("setup", {}).get("symlinks", []):
+                (temp / "demo_workspace" / link).symlink_to(target)
+            policy = json.loads((ROOT / "policies/default.json").read_text(encoding="utf-8"))
+            policy["protected_paths"] += case.get("policy", {}).get("protected_paths_add", [])
+            (temp / "policy.json").write_text(json.dumps(policy), encoding="utf-8")
+            gateway = Gateway(temp / "policy.json", temp / "audit.jsonl",
                               approver=DenyApproval(), base_dir=temp)
             try:
                 for number, step in enumerate(case["steps"], 1):

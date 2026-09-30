@@ -44,10 +44,13 @@ class Executor:
         return f"wrote {len(n['content'])} bytes to {n['path']}"
 
     def _shell_run(self, n: dict) -> str:
+        # stdin is /dev/null: a command with no file operand (`grep foo`) must
+        # not read the gateway's own stdin, which in the MCP proxy is the
+        # client's JSON-RPC channel.
         proc = subprocess.run(
             [n["binary"], *n["args"]],
             shell=False, cwd=n["cwd"], capture_output=True, text=True,
-            timeout=SHELL_TIMEOUT_SEC,
+            stdin=subprocess.DEVNULL, timeout=SHELL_TIMEOUT_SEC,
         )
         out = (proc.stdout + proc.stderr).strip()
         return f"exit={proc.returncode} {out[:2000]}"

@@ -20,7 +20,8 @@ ROOT = Path(__file__).resolve().parent.parent
 
 def score(path: Path) -> dict[str, dict]:
     cases = json.loads((ROOT / "corpus/attacks.json").read_text())
-    known = {case["id"] for case in cases["cases"] if case["id"] != "benign-read"}
+    # Benign cases are controls for the policy, not attacks a model can follow.
+    known = {case["id"] for case in cases["cases"] if not case.get("benign")}
     by_model: dict[str, list[dict]] = defaultdict(list)
     seen: set[tuple[str, str]] = set()
     for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
