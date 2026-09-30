@@ -5,11 +5,19 @@ the server; the proxy launches the real server and relays JSON-RPC over stdio.
 
 - `tools/call` goes through the gateway: policy (registry + path arguments),
   audit, fail-closed. A blocked call never reaches the server; the client gets a
-  tool result with `isError: true` that says which rule stopped it.
+  tool result with `isError: true` that says which rule stopped it. A
+  `tools/call` sent as a notification (no id) is dropped, never relayed.
 - `tools/list` is filtered: tools that are not in the registry are not even
   shown to the model.
-- Everything else (initialize, notifications, pings, server-to-client requests)
-  is relayed untouched.
+- `resources/read` goes through the gateway too and is denied unless the
+  policy lists the server in `mcp_resources`; while denied, resource lists
+  come back empty and subscriptions are refused.
+- Only known MCP methods are relayed (initialize, ping, prompts, completion,
+  logging, notifications, and answers to the server's own requests; a policy
+  can add more with `mcp_relay_methods`). Anything else is refused, and
+  JSON-RPC batches are rejected (MCP 2025-06-18 removed them).
+- Server-to-client requests (sampling, roots, elicitation) are relayed to the
+  client untouched: the client decides on those.
 
 Approval never reads stdin, because stdin is the MCP channel: an action that
 requires approval is denied unless `--tty-approval` is given and a terminal is
@@ -91,6 +99,12 @@ class ServerConnection:
             with self._pending_lock:
                 self._pending.pop(rid, None)
 
+    def read_resource(self, uri: str) -> dict:
+        response = self.request("resources/read", {"uri": uri})
+        if "error" in response:
+            raise RuntimeError(f"server error: {response['error'].get('message')}")
+        return response["result"]
+
     def call_tool(self, name: str, arguments: dict) -> dict:
         response = self.request("tools/call", {"name": name,
                                                "arguments": arguments})
@@ -163,22 +177,101 @@ class McpProxy:
         finally:
             self.server.stop()
 
-    def dispatch(self, message: dict) -> None:
+    RELAYED_METHODS = frozenset({
+        "initialize", "ping", "prompts/list", "prompts/get", "completion/complete",
+        "logging/setLevel",
+    })
+    GATED_METHODS = frozenset({"tools/call", "resources/read"})
+    RESOURCE_METHODS = frozenset({
+        "resources/list", "resources/templates/list", "resources/subscribe",
+        "resources/unsubscribe",
+    })
+
+    def dispatch(self, message) -> None:
+        if isinstance(message, list):
+            self.to_client({"jsonrpc": JSONRPC, "id": None, "error": {
+                "code": -32600,
+                "message": "agent firewall: JSON-RPC batches are not supported"}})
+            log("rejected a JSON-RPC batch")
+            return
+        if not isinstance(message, dict):
+            self.to_client({"jsonrpc": JSONRPC, "id": None, "error": {
+                "code": -32600, "message": "agent firewall: invalid request"}})
+            return
         method = message.get("method")
         is_request = method is not None and "id" in message
         try:
-            if is_request and method == "tools/call":
-                self.to_client(self.handle_call(message))
-            elif is_request and method == "tools/list":
-                self.to_client(self.handle_list(message))
-            else:
+            if method is None:
+                # An answer to a request the server made (sampling, roots, ...).
                 self.server.send(message)
+            elif not is_request:
+                if method in self.GATED_METHODS:
+                    log(f"dropped {method} sent as a notification: it would "
+                        f"reach the server without passing the policy")
+                elif method.startswith("notifications/") \
+                        or method in self.gateway.config.mcp_relay_methods:
+                    self.server.send(message)
+                else:
+                    log(f"dropped unknown notification {method!r}")
+            elif method == "tools/call":
+                self.to_client(self.handle_call(message))
+            elif method == "tools/list":
+                self.to_client(self.handle_list(message))
+            elif method == "resources/read":
+                self.to_client(self.handle_resource_read(message))
+            elif method in self.RESOURCE_METHODS:
+                self.to_client(self.handle_resource_method(message))
+            elif method in self.RELAYED_METHODS \
+                    or method in self.gateway.config.mcp_relay_methods:
+                self.server.send(message)
+            else:
+                self.to_client({"jsonrpc": JSONRPC, "id": message["id"], "error": {
+                    "code": -32601,
+                    "message": f"agent firewall: method {method!r} is not relayed"}})
         except (ConnectionError, TimeoutError, OSError) as e:
             if is_request:
                 self.to_client({"jsonrpc": JSONRPC, "id": message["id"], "error": {
                     "code": -32000, "message": f"agent firewall: {e}"}})
             else:
                 log(f"could not relay {method or 'response'}: {e}")
+
+    def _resources_enabled(self) -> bool:
+        return self.server_name in self.gateway.config.mcp_resources
+
+    def handle_resource_read(self, message: dict) -> dict:
+        params = message.get("params") or {}
+        req = ActionRequest(actor="mcp-client", tool="mcp.resource", params={
+            "server": self.server_name, "uri": params.get("uri")})
+        record, result = self.gateway.handle_with_result(req)
+        if record["outcome"] == "executed":
+            return {"jsonrpc": JSONRPC, "id": message["id"], "result": result}
+        if record["outcome"] == "error":
+            text = f"agent firewall: the resource read failed: {record.get('error')}"
+        else:
+            text = (f"Blocked by agent firewall ({record['rule_id']}): "
+                    f"{record['reason']}")
+        return {"jsonrpc": JSONRPC, "id": message["id"],
+                "error": {"code": -32002, "message": text}}
+
+    def handle_resource_method(self, message: dict) -> dict:
+        method = message["method"]
+        if self._resources_enabled():
+            response = self.server.request(method, message.get("params") or {})
+            reply = {"jsonrpc": JSONRPC, "id": message["id"]}
+            if "error" in response:
+                reply["error"] = response["error"]
+            else:
+                reply["result"] = response.get("result", {})
+            return reply
+        if method == "resources/list":
+            result = {"resources": []}
+        elif method == "resources/templates/list":
+            result = {"resourceTemplates": []}
+        else:
+            return {"jsonrpc": JSONRPC, "id": message["id"], "error": {
+                "code": -32002,
+                "message": "Blocked by agent firewall (mcp-resources-denied)"}}
+        return {"jsonrpc": JSONRPC, "id": message["id"], "result": result}
 
     def handle_call(self, message: dict) -> dict:
         params = message.get("params") or {}

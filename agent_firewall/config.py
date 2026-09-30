@@ -11,6 +11,12 @@ import json
 from pathlib import Path
 
 
+DEFAULT_MCP_PATH_ARGUMENTS = [
+    "path", "paths", "source", "destination", "file", "files", "filename",
+    "filepath", "file_path", "dir", "directory", "src", "dest", "target", "root",
+]
+
+
 class Config:
     def __init__(self, path: str | Path, base_dir: str | Path | None = None):
         path = Path(path)
@@ -29,10 +35,21 @@ class Config:
         self.mcp_registry = {
             srv: set(tools) for srv, tools in raw.get("mcp_registry", {}).items()
         }
-        # MCP tool arguments that carry filesystem paths; they get the same
-        # protected-path check as fs.read, after realpath.
+        # MCP tool arguments that always carry filesystem paths. Any other string
+        # argument that looks like a path is checked too (see policy._mcp_call);
+        # this list only removes the guesswork for the common names.
         self.mcp_path_arguments = set(raw.get(
-            "mcp_path_arguments", ["path", "paths", "source", "destination"]))
+            "mcp_path_arguments", DEFAULT_MCP_PATH_ARGUMENTS))
+        # Relative MCP path arguments resolve against the server's own root when
+        # the policy names it, else against the sandbox root.
+        self.mcp_roots = {srv: self._abs(base, root)
+                          for srv, root in raw.get("mcp_roots", {}).items()}
+        # MCP resources (resources/read and friends) are denied unless a server
+        # is listed here: their URIs can name any file the server can reach.
+        self.mcp_resources = set(raw.get("mcp_resources", []))
+        # Extra JSON-RPC methods the MCP proxy relays untouched (the standard
+        # ones are built in; anything else is refused).
+        self.mcp_relay_methods = set(raw.get("mcp_relay_methods", []))
         self.approval_timeout_sec = int(raw.get("approval_timeout_sec", 30))
         # audience -> operation -> {"scope": ..., "decision": allow|require_approval|block}
         self.apis = {

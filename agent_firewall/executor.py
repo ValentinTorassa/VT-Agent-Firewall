@@ -32,6 +32,7 @@ class Executor:
             "shell.run": self._shell_run,
             "net.request": self._net_request,
             "mcp.call": self._mcp_call,
+            "mcp.resource": self._mcp_resource,
             "api.call": self._api_call,
         }[tool](normalized)
 
@@ -75,6 +76,12 @@ class Executor:
         if n["tool"] == "echo":
             return str(n["arguments"].get("text", ""))
         return f"simulated result for {n['server']}/{n['tool']}"
+
+    def _mcp_resource(self, n: dict):
+        backend = self.mcp_backends.get(n["server"])
+        if backend is None:
+            raise RuntimeError(f"no MCP connection for {n['server']!r}")
+        return backend.read_resource(n["uri"])
 
     def _api_call(self, n: dict) -> dict:
         # The token is minted here, after the policy said yes, for exactly the
