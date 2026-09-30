@@ -27,7 +27,7 @@ El agente nunca toca `subprocess`, `open` o la red directamente. Cada acción
 es un `ActionRequest` que atraviesa el pipeline:
 
 ```text
-ActionRequest → normalize (realpath, shlex argv, parse URL)
+ActionRequest → normalize (realpath, shlex argv + gramática por binario, parse URL)
               → policy engine (default-deny, reglas declarativas)
               → require_approval? (terminal, muestra la acción NORMALIZADA)
               → audit (append-only JSONL, fuera del sandbox)
@@ -42,10 +42,11 @@ disponible → deny.
 
 ```text
 VT-Agent-Firewall/
-  agent_firewall/   # models, config, policy, executor, audit, approval, gateway
+  agent_firewall/   # models, config, policy, argv (gramáticas), executor, audit, approval, gateway
   policies/         # default.json (sandbox, protected, allowlists, MCP registry)
-  scripts/          # run_demo.py, mock_receiver.py
-  tests/            # test_gateway.py (AC1-AC12)
+  corpus/           # attacks.json: inyecciones sintéticas y la decisión esperada
+  scripts/          # run_demo.py, mock_receiver.py, run_corpus.py, score_model_following.py
+  tests/            # test_gateway.py (AC1-AC12), test_bypasses.py, test_mcp_proxy.py, ...
   logs/             # audit.jsonl (fuera del sandbox, append-only)
   demo_workspace/   # sandbox de pruebas (fake)
   docs/             # THREAT_MODEL.md; build-prompts/ (prompts con los que se armó)
@@ -73,7 +74,7 @@ loopback; con el gateway activo debe recibir 0 payloads.
 ## Test
 
 ```bash
-python3 -m unittest discover -s tests -v   # 21 tests, AC1-AC12
+python3 -m unittest discover -s tests -v   # AC1-AC12, OAuth, proxy MCP y regresiones de bypass
 ```
 
 ## Reset
@@ -86,15 +87,18 @@ python3 scripts/run_demo.py --reset        # trunca logs/audit.jsonl
 
 | rule_id | efecto |
 |---|---|
-| `fs-protected` | block: `.env`, `fake_credentials.txt` (post-realpath, symlinks incluidos) |
+| `fs-protected` | block: `.env`, `fake_credentials.txt` y todo lo que esté debajo de un path protegido (post-realpath, symlinks incluidos) |
 | `fs-sandbox` | block: cualquier path fuera de `demo_workspace/` |
 | `fs-write-scope` | require_approval: escritura dentro del sandbox pero fuera de `writable_dirs` |
 | `sh-allowlist` | block: binario no permitido (`base64`, `curl`, `python3`, `sh`, `cp`, ...) |
-| `sh-args` | block: args prohibidos (`find -exec`, `-delete`) |
-| `sh-paths` | block: argv toca path protegido o fuera del sandbox |
+| `sh-args` | block: opciones fuera de la gramática del binario y predicados de `find` fuera de la allowlist (`-exec`, `-ok`, `-fprint`, `-delete`, ...) |
+| `sh-paths` | block: argv, valores de opciones incluidos (`--file=.env`), toca path protegido o fuera del sandbox |
+| `sh-recursive` | block: un recorrido recursivo (`grep -r`, `ls -R`, `find`) llegaría a un path protegido o saldría del sandbox, siguiendo symlinks |
 | `net-deny-all` | block: red deny-total, sin excepciones (ni loopback) |
-| `taint-session` | block adicional: la sesión tocó un path protegido |
+| `taint-session` | block adicional: la sesión nombró o alcanzó un path protegido, aunque ese pedido se haya bloqueado |
 | `mcp-unknown-tool` | block: server/tool MCP fuera del registry |
+| `mcp-protected-path` / `mcp-sandbox` | block: un argumento MCP resuelve a un path protegido o fuera del sandbox |
+| `mcp-resources-denied` | block: lectura de resources MCP sin habilitar en la política |
 | `approval-denied` | block: humano rechazó o timeout (stdin no interactivo = deny) |
 | `fail-closed` | block: audit store no disponible |
 
@@ -118,8 +122,11 @@ mismo ataque frenado por el gateway. Detalle en el [README en inglés](README.md
 stdio: el cliente lanza el proxy como si fuera el servidor y el proxy lanza el real.
 Cada `tools/call` pasa por la política y la auditoría (lo bloqueado nunca llega al
 servidor), `tools/list` se filtra para que el modelo no vea herramientas no
-registradas, los argumentos de ruta pasan el mismo chequeo de paths protegidos que
-`fs.read`, y `--pin RUTA=SHA256` impide arrancar un servidor cuyo código cambió.
+registradas, todo argumento que lleve una ruta (con cualquier nombre, anidado o no)
+pasa los mismos chequeos que `fs.read`, incluido el del sandbox, `resources/read` queda
+denegado salvo que la política lo habilite, los batches JSON-RPC se rechazan, un
+`tools/call` mandado como notificación se descarta, y `--pin RUTA=SHA256` impide
+arrancar un servidor cuyo código cambió.
 Probado contra `@modelcontextprotocol/server-filesystem` 0.2.0. Configuración de
 ejemplo en el [README en inglés](README.md#mcp-proxy).
 
@@ -132,7 +139,28 @@ ejemplo en el [README en inglés](README.md#mcp-proxy).
 - Las acciones permitidas dejan un intento durable antes de ejecutarse y un
   resultado después. Si hay un crash entre ambos, el intento queda pendiente de
   conciliación: por sí solo no prueba si ocurrió la acción externa.
-- Sin análisis semántico de comandos, DoS, ni carreras TOCTOU.
+- Las gramáticas de shell siguen la sintaxis GNU (coreutils, grep, findutils). Un
+  binario agregado a la allowlist sin gramática usa un fallback conservador.
+- Los recorridos recursivos se chequean antes de correr el comando: el árbol puede
+  cambiar en el medio (TOCTOU) y los árboles de más de 20.000 entradas se rechazan.
+- Sin análisis semántico de comandos ni DoS.
+
+## Corpus de ataques reproducible
+
+`corpus/attacks.json` guarda veintiún instrucciones sintéticas (dos son controles
+benignos), el pedido de herramienta que generan y la decisión y regla esperadas.
+Desde 0.1.1 incluye las clases de bypass encontradas en la revisión: lecturas
+recursivas que llegan a un secreto sin nombrarlo, opciones con archivo como valor,
+un `find` que escribe, un archivo dentro de un directorio protegido y argumentos MCP
+fuera del sandbox o con un nombre inesperado.
+
+```bash
+python3 scripts/run_corpus.py              # cada caso en un workspace temporal propio
+```
+
+El corpus prueba la política, no si un modelo seguiría la instrucción.
+`scripts/score_model_following.py traza-revisada.jsonl` puntúa aparte continuaciones
+de modelos revisadas a mano; lo incierto no cuenta como resistencia.
 
 ## Prompts
 

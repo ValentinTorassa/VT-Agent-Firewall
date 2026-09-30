@@ -10,7 +10,7 @@ A fail-closed gateway between an AI agent and its tools. The agent never calls
 through the same pipeline, and anything the pipeline cannot vouch for is denied.
 
 ```text
-ActionRequest → normalize        realpath, shlex argv, parsed URL (spelled params are hostile)
+ActionRequest → normalize        realpath, shlex argv + per-binary grammar, parsed URL (spelled params are hostile)
               → policy           default-deny, declarative rules, per-session taint
               → human approval   shows the NORMALIZED action, never the agent's description
               → audit            append-only JSONL, outside the sandbox
@@ -23,7 +23,7 @@ than act unaudited.
 
 ![The same prompt-injected agent without the gateway (the fake key is exfiltrated) and through it (every attempt blocked and audited)](docs/demo.gif)
 
-**Status: alpha (0.1.0).** Standard library only, Python 3.11+. Built as the
+**Status: alpha (0.1.1).** Standard library only, Python 3.11+. Built as the
 reference implementation for the talk *"Dónde se rompe OAuth cuando el que llama es
 un agente"* (OWASP Village, Ekoparty 2026). Not production-ready; see
 [Limitations](#limitations).
@@ -38,8 +38,8 @@ cd VT-Agent-Firewall
 python3 scripts/run_demo.py --health       # static sanity checks
 python3 scripts/run_demo.py                # the attack, through the gateway
 python3 scripts/run_demo.py --no-firewall  # contrast: the same attack without it
-python3 -m unittest discover -s tests -v   # AC1–AC12 + the four OAuth failure modes
-python3 scripts/run_corpus.py                # 8 isolated synthetic injection cases
+python3 -m unittest discover -s tests -v   # AC1–AC12, the OAuth failure modes, bypass regressions
+python3 scripts/run_corpus.py              # 21 isolated synthetic injection cases
 ```
 
 ## The demo
@@ -54,15 +54,18 @@ All data in `demo_workspace/` is synthetic bait.
 
 | rule_id | effect |
 |---|---|
-| `fs-protected` | block reads/writes of protected paths, after `realpath` (symlinks included) |
+| `fs-protected` | block reads/writes of protected paths and anything under them, after `realpath` (symlinks included) |
 | `fs-sandbox` | block any path or `cwd` outside the sandbox |
 | `fs-write-scope` | require approval for writes inside the sandbox but outside `writable_dirs` |
 | `sh-allowlist` | block binaries not on the allowlist (`curl`, `python3`, `sh`, …) |
-| `sh-args` | block forbidden arguments (`find -exec`, `-delete`) |
-| `sh-paths` | block argv that touches a protected path or leaves the sandbox |
+| `sh-args` | block options outside the binary's grammar and `find` predicates outside the allowlist (`-exec`, `-ok`, `-fprint`, `-delete`, …) |
+| `sh-paths` | block argv, including option values (`--file=.env`, `-f.env`), that touches a protected path or leaves the sandbox |
+| `sh-recursive` | block a recursive walk (`grep -r`, `ls -R`, `find`) that would reach a protected path or leave the sandbox, symlinks followed |
 | `net-deny-all` | block all network, loopback included |
-| `taint-session` | extra block once the session has touched a protected path |
+| `taint-session` | extra block once the session has named or reached a protected path, even in a blocked request |
 | `mcp-unknown-tool` | block MCP server/tool pairs outside the registry |
+| `mcp-protected-path` / `mcp-sandbox` | block MCP arguments that resolve to a protected path or leave the sandbox |
+| `mcp-resources-denied` | block MCP resource reads unless the policy enables them for that server |
 | `approval-denied` | block when the human says no, times out, or stdin is not interactive |
 | `fail-closed` | block everything when the audit store is unavailable |
 | `api-ok` / `api-approval` / `api-blocked` | per-operation decision for `api.call`, taken before any credential exists |
@@ -103,8 +106,16 @@ client launches the proxy as if it were the server; the proxy launches the real 
 - every `tools/call` goes through the policy and the audit log; a blocked call never
   reaches the server and the client gets `isError: true` naming the rule;
 - `tools/list` is filtered, so unregistered tools are not even shown to the model;
-- path arguments (`path`, `paths`, `source`, `destination`) get the same
-  protected-path check as `fs.read`, after `realpath`;
+- every argument that carries a path gets the same checks as `fs.read`, after
+  `realpath`: the usual names (`path`, `file`, `source`, `target`, …, configurable
+  with `mcp_path_arguments`), and any other string that looks like a path or names
+  something under the server's root (`mcp_roots`); nested values included. A path
+  outside the sandbox is blocked, not only a protected one;
+- `resources/read` goes through the policy and is denied unless the server is listed
+  in `mcp_resources`;
+- only known MCP methods are relayed; JSON-RPC batches are rejected and a
+  `tools/call` sent as a notification is dropped, so nothing reaches the server
+  around the policy;
 - `--pin PATH=SHA256` refuses to start a server whose code changed;
 - approval never reads stdin (it is the MCP channel): it is denied unless
   `--tty-approval` is set and a terminal is available.
@@ -133,13 +144,16 @@ checking at all, so every block comes from the proxy.
 ## Layout
 
 ```text
-agent_firewall/   models, config, policy, executor, audit, approval, gateway,
-                  credentials (token broker), mock_apis, mcp_proxy
+agent_firewall/   models, config, policy, argv (per-binary grammars), executor,
+                  audit, approval, gateway, credentials (token broker), mock_apis,
+                  mcp_proxy
+corpus/           attacks.json: synthetic injections and their expected decisions
 policies/         default.json: sandbox, protected paths, allowlists, MCP registry
-scripts/          run_demo.py, mock_receiver.py
+scripts/          run_demo.py, mock_receiver.py, run_corpus.py, score_model_following.py
 examples/         fs_mcp_server.py (a naive MCP server for tests and demos)
 tests/            acceptance tests AC1–AC12, test_delegation.py (the four OAuth failure
-                  modes), test_mcp_proxy.py (a real MCP server over stdio)
+                  modes), test_mcp_proxy.py (a real MCP server over stdio),
+                  test_bypasses.py (every bypass found in review, as a regression)
 docs/             THREAT_MODEL.md; build-prompts/ (how the first version was scaffolded)
 demo_workspace/   synthetic sandbox for the demo
 ```
@@ -157,14 +171,26 @@ These are deliberate v0 boundaries, not hidden ones:
 - **The demo agent is a scripted list of requests.** The MCP proxy is real; the demo
   still uses the simulated `demo` MCP server.
 - **The MCP proxy handles one call at a time** and only covers stdio servers.
+- **The shell grammars follow GNU userland** (coreutils, grep, findutils). Binaries
+  added without a grammar get a conservative fallback. See the
+  [threat model](docs/THREAT_MODEL.md#known-limitations) for the rest.
+- **Audit records are minimized:** written content is kept as a SHA-256 and a
+  length, network bodies as a 64-character preview plus a digest. Pass
+  `audit_verbose=True` (or `"audit": {"verbose": true}` in the policy) for full
+  records while debugging.
 - **Tokens are bearer tokens.** They are not sender-constrained (DPoP) yet: a stolen
   access token works for anyone until it expires, which is why it lives five minutes.
 - **The APIs are mocks** (`agent_firewall/mock_apis.py`) and the broker is in-process.
 
 ## Reproducible attack corpus
 
-`corpus/attacks.json` records twelve synthetic untrusted instructions, their
-resulting tool requests and the expected decision and rule. `scripts/run_corpus.py`
+`corpus/attacks.json` records twenty-one synthetic untrusted instructions (two of
+them benign controls), their resulting tool requests and the expected decision and
+rule. Since 0.1.1 it includes the bypass classes found in review: recursive reads
+that reach a secret without naming it, file-valued options, a `find` action that
+writes, a child of a protected directory, and MCP arguments outside the sandbox or
+under an unexpected name. A case can add symlinks (`setup.symlinks`) or protected
+paths (`policy.protected_paths_add`) to its own workspace. `scripts/run_corpus.py`
 gives each case a fresh temporary workspace and gateway session, checks every
 decision and audit record, and verifies that the canary was not changed. The
 corpus tests policy behavior; it does not measure whether a language model would
@@ -178,7 +204,8 @@ Keep traces synthetic and do not include raw prompts, tool arguments, or secrets
 ## Roadmap
 
 v0.1.0 shipped the gateway, the token broker with the four OAuth failure modes, and
-the MCP proxy ([CHANGELOG](CHANGELOG.md)). Next:
+the MCP proxy; v0.1.1 closes the bypasses found in review ([CHANGELOG](CHANGELOG.md)).
+Next:
 
 1. Sender-constrained tokens (DPoP), so a stolen access token is useless.
 2. Content-level taint, not only per path.
