@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.1 — unreleased
+## 0.1.1 — 2026-09-30
 
 Closes the bypasses found in the 2026-09-29 review. Every one is a regression test
 (`tests/test_bypasses.py`, `tests/test_mcp_proxy.py`) and a corpus case.
