@@ -3,13 +3,18 @@
 Normalization happens BEFORE evaluation and the executor only receives
 normalized params:
 - every fs path is canonicalized with realpath (resolves `..` and symlinks)
-- shell requests are tokenized to argv (shlex) and never reach a shell
+- shell requests are tokenized to argv (shlex), parsed with the binary's own
+  grammar (argv.py) and never reach a shell
 - URLs are parsed into scheme/host/port
+
+A protected path covers everything below it. Any request that names or
+reaches one, blocked or not, taints the session.
 
 Rule precedence (per tool, most specific first):
   fs-protected > fs-sandbox > tool-specific checks > allow/default-deny
-Fail-closed: malformed params, unknown tools, or no matching allow rule
-all produce BLOCK.
+Shell order: sh-allowlist > sh-paths > sh-args > sh-recursive.
+Fail-closed: malformed params, unknown tools, options outside a grammar, or
+no matching allow rule all produce BLOCK.
 """
 
 from __future__ import annotations
@@ -19,6 +24,7 @@ import shlex
 from pathlib import Path
 from urllib.parse import urlparse
 
+from . import argv as argv_grammar
 from .config import Config
 from .models import ActionRequest, Decision, PolicyDecision
 from .session import SessionState
@@ -142,22 +148,18 @@ class PolicyEngine:
         if not self.cfg.in_sandbox(cwd):
             return self._decide(req, Decision.BLOCK, "fs-sandbox",
                                 f"cwd escapes sandbox: {cwd}", "high", normalized)
+        # Taint on potential access: any token (or --opt=value) that names a
+        # protected path taints the session, whatever the decision below.
+        self._taint_if_named(args, cwd, session)
         if binary not in self.cfg.shell_allowlist:
             return self._decide(req, Decision.BLOCK, "sh-allowlist",
                                 f"binary not allowlisted: {binary}", "high",
                                 normalized)
-        forbidden = self.cfg.shell_forbidden_args.get(binary, set())
-        bad = sorted(forbidden.intersection(args))
-        if bad:
-            return self._decide(req, Decision.BLOCK, "sh-args",
-                                f"forbidden args for {binary}: {bad}", "high",
-                                normalized)
-        # Every non-flag argument is treated as a path candidate and checked
-        # against the canonical filesystem view.
-        for arg in args:
-            if arg.startswith("-"):
-                continue
-            resolved = self._resolve_path(arg, cwd)
+        parsed = argv_grammar.parse(binary, args)
+        # Every file the grammar says the command may open is checked against
+        # the canonical filesystem view, option values included (--file=.env).
+        for spelled in parsed.paths:
+            resolved = self._resolve_path(spelled, cwd)
             if self.cfg.is_protected(resolved):
                 session.tainted = True
                 return self._decide(req, Decision.BLOCK, "sh-paths",
@@ -168,9 +170,88 @@ class PolicyEngine:
                 return self._decide(req, Decision.BLOCK, "sh-paths",
                                     f"argv escapes sandbox: {resolved}", "high",
                                     normalized)
+        forbidden = sorted(self.cfg.shell_forbidden_args.get(binary, set())
+                           .intersection(args))
+        if parsed.errors or forbidden:
+            bad = forbidden + [e for e in parsed.errors if e not in forbidden]
+            return self._decide(req, Decision.BLOCK, "sh-args",
+                                f"arguments outside the {binary} grammar or "
+                                f"forbidden: {bad}", "high", normalized)
+        # A recursive read names no protected file; it reaches one. Walk the
+        # trees it would descend, symlinks followed, before letting it run.
+        for spelled in parsed.walk_roots:
+            root = self._resolve_path(spelled, cwd)
+            hit = self._tree_hit(root, parsed.max_depth)
+            if hit is None:
+                continue
+            kind, where = hit
+            if kind == "protected":
+                session.tainted = True
+                return self._decide(req, Decision.BLOCK, "sh-recursive",
+                                    f"{binary} would walk into protected path "
+                                    f"{where} from {root}", "high", normalized,
+                                    matched=["sh-recursive", "fs-protected"])
+            reason = (f"{binary} would leave the sandbox through {where}"
+                      if kind == "escape" else
+                      f"tree under {root} is too large to verify")
+            return self._decide(req, Decision.BLOCK, "sh-recursive", reason,
+                                "high", normalized)
         return self._decide(req, Decision.ALLOW, "sh-ok",
                             f"allowlisted binary, paths in sandbox: {binary}",
                             "low", normalized)
+
+    TREE_WALK_LIMIT = 20_000
+
+    def _tree_hit(self, root: Path, max_depth: int | None):
+        """First protected path or sandbox escape reachable from `root`,
+        following symlinks, within `max_depth`. Fail-closed on huge trees."""
+        found = self.cfg.protected_under(root, max_depth)
+        if found is not None:
+            return "protected", found
+        seen = {root}
+        stack = [(root, 0)]
+        visited = 0
+        while stack:
+            directory, depth = stack.pop()
+            if max_depth is not None and depth >= max_depth:
+                continue
+            try:
+                entries = list(os.scandir(directory))
+            except OSError:
+                continue
+            for entry in entries:
+                visited += 1
+                if visited > self.TREE_WALK_LIMIT:
+                    return "limit", directory
+                real = Path(os.path.realpath(entry.path))
+                if self.cfg.is_protected(real):
+                    return "protected", real
+                if not self.cfg.in_sandbox(real):
+                    return "escape", real
+                try:
+                    is_dir = entry.is_dir(follow_symlinks=True)
+                except OSError:
+                    is_dir = False
+                if is_dir and real not in seen:
+                    seen.add(real)
+                    remaining = None if max_depth is None else max_depth - depth - 1
+                    found = self.cfg.protected_under(real, remaining)
+                    if found is not None:
+                        return "protected", found
+                    stack.append((real, depth + 1))
+        return None
+
+    def _taint_if_named(self, tokens: list[str], cwd: Path, session) -> None:
+        for token in tokens:
+            for spelled in (token, token.partition("=")[2]):
+                if not spelled or "\0" in spelled:
+                    continue
+                try:
+                    if self.cfg.is_protected(self._resolve_path(spelled, cwd)):
+                        session.tainted = True
+                        return
+                except (OSError, ValueError):
+                    continue
 
     # -- net.request ----------------------------------------------------------
 

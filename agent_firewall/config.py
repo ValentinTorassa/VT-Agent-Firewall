@@ -49,7 +49,18 @@ class Config:
         return resolved == self.sandbox_root or self.sandbox_root in resolved.parents
 
     def is_protected(self, resolved: Path) -> bool:
-        return resolved in self.protected
+        """A protected entry covers itself and everything below it, so a
+        protected directory cannot be read file by file."""
+        return any(p == resolved or p in resolved.parents for p in self.protected)
+
+    def protected_under(self, root: Path, max_depth: int | None = None) -> Path | None:
+        """First protected path inside the tree rooted at `root` (depth-limited
+        like `find -maxdepth`: the root is depth 0), or None."""
+        for p in sorted(self.protected):
+            if p == root or root in p.parents:
+                if max_depth is None or len(p.relative_to(root).parts) <= max_depth:
+                    return p
+        return None
 
     def in_writable(self, resolved: Path) -> bool:
         return any(d == resolved or d in resolved.parents for d in self.writable_dirs)
