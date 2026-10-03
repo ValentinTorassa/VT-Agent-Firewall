@@ -12,6 +12,11 @@ import os
 import sys
 from pathlib import Path
 
+try:
+    import fcntl
+except ImportError:  # no advisory locks (Windows): one writer per file
+    fcntl = None
+
 
 class AuditUnavailable(Exception):
     pass
@@ -29,9 +34,18 @@ class AuditLogger:
             raise AuditUnavailable(f"cannot open audit log {self.path}: {e}") from e
 
     def log(self, record: dict) -> None:
-        self._fh.write(json.dumps(record, sort_keys=True) + "\n")
-        self._fh.flush()
-        os.fsync(self._fh.fileno())
+        line = json.dumps(record, sort_keys=True) + "\n"
+        # Several processes may append to one file (parallel agent-hook calls):
+        # hold an exclusive lock for the whole record so lines never interleave.
+        if fcntl is not None:
+            fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX)
+        try:
+            self._fh.write(line)
+            self._fh.flush()
+            os.fsync(self._fh.fileno())
+        finally:
+            if fcntl is not None:
+                fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
 
     def poison(self, record: dict) -> None:
         """Last-resort channel when the audit store itself fails mid-run."""
