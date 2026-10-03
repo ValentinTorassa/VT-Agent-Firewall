@@ -4,7 +4,9 @@ Normalization happens BEFORE evaluation and the executor only receives
 normalized params:
 - every fs path is canonicalized with realpath (resolves `..` and symlinks)
 - shell requests are tokenized to argv (shlex), parsed with the binary's own
-  grammar (argv.py) and never reach a shell
+  grammar (argv.py) and never reach a shell; a request marked `via_shell`
+  (an agent host's Bash tool, which does use a shell) must first be one
+  simple command with nothing for the shell to expand (shell_syntax.py)
 - URLs are parsed into scheme/host/port
 
 A protected path covers everything below it. Any request that names or
@@ -12,7 +14,8 @@ reaches one, blocked or not, taints the session.
 
 Rule precedence (per tool, most specific first):
   fs-protected > fs-sandbox > tool-specific checks > allow/default-deny
-Shell order: sh-allowlist > sh-paths > sh-args > sh-recursive.
+Shell order: sh-syntax (via_shell only) > sh-allowlist > sh-paths > sh-args >
+sh-recursive.
 Fail-closed: malformed params, unknown tools, options outside a grammar, or
 no matching allow rule all produce BLOCK.
 """
@@ -25,6 +28,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from . import argv as argv_grammar
+from . import shell_syntax
 from .config import Config
 from .models import ActionRequest, Decision, PolicyDecision
 from .session import SessionState
@@ -136,6 +140,13 @@ class PolicyEngine:
         # Accept either command+args or a command_line string. The string is
         # tokenized with shlex and NEVER passed to a shell: metacharacters
         # become literal argv tokens, so pipes/redirection/subshells are inert.
+        # That only holds when the gateway executes. With `via_shell` the host
+        # hands the line to bash or zsh, so it must be one simple command whose
+        # shlex argv is exactly what the shell will run.
+        if req.params.get("via_shell"):
+            blocked = self._shell_syntax(req, session)
+            if blocked:
+                return blocked
         if "command_line" in req.params:
             argv = shlex.split(req.params["command_line"])
         else:
@@ -200,6 +211,26 @@ class PolicyEngine:
         return self._decide(req, Decision.ALLOW, "sh-ok",
                             f"allowlisted binary, paths in sandbox: {binary}",
                             "low", normalized)
+
+    def _shell_syntax(self, req, session) -> PolicyDecision | None:
+        line = req.params["command_line"]
+        found = shell_syntax.problem(line)
+        if found is None:
+            return None
+        cwd = self._resolve_cwd(req.params)
+        try:
+            # Best effort: a refused line that names a protected path still
+            # taints the session.
+            self._taint_if_named(shlex.split(line), cwd, session)
+        except ValueError:
+            pass
+        return self._decide(req, Decision.BLOCK, "sh-syntax",
+                            f"the host runs this line through a shell and it "
+                            f"contains {found}; only one simple command with "
+                            f"literal arguments can be checked (no pipes, "
+                            f"redirects, chaining, substitution, variables, "
+                            f"globs or ~): split it into separate calls",
+                            "high", {"command_line": line, "cwd": str(cwd)})
 
     TREE_WALK_LIMIT = 20_000
 
