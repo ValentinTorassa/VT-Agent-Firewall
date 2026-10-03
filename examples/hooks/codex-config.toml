@@ -1,0 +1,10 @@
+# Inline hooks for <repo>/.codex/config.toml (or ~/.codex/config.toml).
+# Codex skips a new or changed hook until it is trusted in /hooks.
+[[hooks.PreToolUse]]
+matcher = "^(Bash|apply_patch)$"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = 'vt-agent-firewall-hook --host codex --policy "$(git rev-parse --show-toplevel)/.codex/agent-firewall.json" --base-dir "$(git rev-parse --show-toplevel)" --audit "$HOME/.local/state/vt-agent-firewall/codex-audit.jsonl"'
+timeout = 30
+statusMessage = "Agent firewall"

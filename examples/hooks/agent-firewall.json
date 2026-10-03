@@ -1,0 +1,37 @@
+{
+  "sandbox_root": ".",
+  "protected_paths": [
+    ".env",
+    ".envrc",
+    ".mcp.json",
+    ".claude",
+    ".codex",
+    ".git/config",
+    ".git/hooks"
+  ],
+  "writable_dirs": [
+    "src",
+    "tests",
+    "docs"
+  ],
+  "shell_allowlist": [
+    "ls",
+    "grep",
+    "cat",
+    "head",
+    "tail",
+    "find",
+    "wc"
+  ],
+  "shell_forbidden_args": {
+    "find": [
+      "-exec",
+      "-execdir",
+      "-delete"
+    ]
+  },
+  "network": {
+    "mode": "deny_all"
+  },
+  "mcp_registry": {}
+}
