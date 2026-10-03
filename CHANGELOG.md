@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.2.0 — unreleased
+
+The policy now reaches an agent host's built-in tools, not only MCP tools.
+
+- **Agent hook (`vt-agent-firewall-hook`, `agent_firewall/hook.py`):** a
+  `PreToolUse` hook for Claude Code and Codex. `Bash` and `Monitor` become
+  `shell.run`, `Read` becomes `fs.read`, `Write`/`Edit`/`MultiEdit`/`NotebookEdit`
+  become `fs.write`, `WebFetch` and WebSocket monitors become `net.request`,
+  `mcp__<server>__<tool>` becomes `mcp.call`, and a Codex `apply_patch` becomes one
+  `fs.write` per file it touches; any other tool is denied (`unknown-tool`).
+  `block` answers deny (JSON on stdout and exit 2 with the reason on stderr),
+  `require_approval` answers Claude Code's `ask` (denied on Codex, which ignores
+  `ask` from a hook, and in Claude Code's `bypassPermissions` mode), and `allow`
+  stays silent so the host's own permission rules still apply (`--emit-allow` for
+  an explicit allow on Claude Code).
+- **Fail-closed hook:** malformed input, an unmapped tool, an unreadable policy, an
+  unavailable audit log, an internal error and the hook's own deadline
+  (`--deadline`, 20 s, below the host timeout) all deny with exit 2, the only exit
+  code both hosts treat as a block. The policy file and the audit log are added to
+  the protected paths, so the agent can neither read nor rewrite them.
+- **`sh-syntax` (`agent_firewall/shell_syntax.py`):** a `shell.run` request marked
+  `via_shell`, because a host will hand the line to bash or zsh, must be one simple
+  command with nothing for the shell to expand. `cat notes.txt; curl ...`,
+  `cat .e*`, `cat $(echo .env)` and redirects used to look like `cat` with odd
+  file names. A refused line that names a protected path still taints the session.
+- **Audit without execution:** `Gateway.decide()` runs the policy and records the
+  decision without executing; an allowed call gets a fsynced `delegated` record
+  before the host may act. `Gateway.refuse()` records input that could not become
+  a request (`parse-error`, with a digest of the raw input). Hook records carry
+  `host`, `host_tool`, `session_id`, `permission_mode` and the host's `tool_use_id`
+  as `correlation_id`.
+- **Audit writes are locked:** each record is written under an exclusive advisory
+  lock (POSIX), so parallel hook processes appending to one log keep every record
+  on its own line.
+- Docs: `docs/AGENT_HOOKS.md` (install for both hosts, a smoke test, what it blocks,
+  the protocol details it relies on, its limits), with examples in
+  `examples/hooks/`. README, README.es and the threat model cover the hook.
+- Tests: `tests/test_hook.py` (deny, ask, allow, malformed input, fail-closed paths,
+  audit records, Codex patches, a real subprocess run). The corpus has 26 cases;
+  the five new ones are lines a host shell would expand.
+- CI checks the `vt-agent-firewall-hook` entry point.
+
 ## 0.1.1 — 2026-09-30
 
 Closes the bypasses found in the 2026-09-29 review. Every one is a regression test
