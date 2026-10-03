@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Monitor|Read|Write|Edit|MultiEdit|NotebookEdit|WebFetch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "vt-agent-firewall-hook --policy \"$CLAUDE_PROJECT_DIR/.claude/agent-firewall.json\" --base-dir \"$CLAUDE_PROJECT_DIR\" --audit \"$HOME/.local/state/vt-agent-firewall/audit.jsonl\"",
+            "timeout": 30,
+            "statusMessage": "Agent firewall"
+          }
+        ]
+      }
+    ]
+  }
+}

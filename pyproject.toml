@@ -26,6 +26,7 @@ dependencies = []
 
 [project.scripts]
 vt-agent-firewall-mcp = "agent_firewall.mcp_proxy:main"
+vt-agent-firewall-hook = "agent_firewall.hook:main"
 
 [project.urls]
 Repository = "https://github.com/ValentinTorassa/VT-Agent-Firewall"
