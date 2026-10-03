@@ -23,7 +23,7 @@ than act unaudited.
 
 ![The same prompt-injected agent without the gateway (the fake key is exfiltrated) and through it (every attempt blocked and audited)](docs/demo.gif)
 
-**Status: alpha (0.1.1).** Standard library only, Python 3.11+. Built as the
+**Status: alpha (0.2.0).** Standard library only, Python 3.11+. Built as the
 reference implementation for the talk *"Dónde se rompe OAuth cuando el que llama es
 un agente"* (OWASP Village, Ekoparty 2026). Not production-ready; see
 [Limitations](#limitations).
@@ -31,7 +31,7 @@ un agente"* (OWASP Village, Ekoparty 2026). Not production-ready; see
 ## Quickstart
 
 ```bash
-pip install vt-agent-firewall   # library + vt-agent-firewall-mcp (PyPI)
+pip install vt-agent-firewall   # library + vt-agent-firewall-mcp + vt-agent-firewall-hook (PyPI)
 
 git clone https://github.com/ValentinTorassa/VT-Agent-Firewall   # to run the demo and tests
 cd VT-Agent-Firewall
@@ -39,7 +39,7 @@ python3 scripts/run_demo.py --health       # static sanity checks
 python3 scripts/run_demo.py                # the attack, through the gateway
 python3 scripts/run_demo.py --no-firewall  # contrast: the same attack without it
 python3 -m unittest discover -s tests -v   # AC1–AC12, the OAuth failure modes, bypass regressions
-python3 scripts/run_corpus.py              # 21 isolated synthetic injection cases
+python3 scripts/run_corpus.py              # 26 isolated synthetic injection cases
 ```
 
 ## The demo
@@ -57,6 +57,7 @@ All data in `demo_workspace/` is synthetic bait.
 | `fs-protected` | block reads/writes of protected paths and anything under them, after `realpath` (symlinks included) |
 | `fs-sandbox` | block any path or `cwd` outside the sandbox |
 | `fs-write-scope` | require approval for writes inside the sandbox but outside `writable_dirs` |
+| `sh-syntax` | block a line an agent host's shell would run (`via_shell`) unless it is one simple command with literal arguments: no pipes, redirects, chaining, substitution, variables, globs or `~` |
 | `sh-allowlist` | block binaries not on the allowlist (`curl`, `python3`, `sh`, …) |
 | `sh-args` | block options outside the binary's grammar and `find` predicates outside the allowlist (`-exec`, `-ok`, `-fprint`, `-delete`, …) |
 | `sh-paths` | block argv, including option values (`--file=.env`, `-f.env`), that touches a protected path or leaves the sandbox |
@@ -68,6 +69,8 @@ All data in `demo_workspace/` is synthetic bait.
 | `mcp-resources-denied` | block MCP resource reads unless the policy enables them for that server |
 | `approval-denied` | block when the human says no, times out, or stdin is not interactive |
 | `fail-closed` | block everything when the audit store is unavailable |
+| `unknown-tool` / `parse-error` | block a tool with no policy and a request that cannot be parsed (default-deny) |
+| `hook-unsupported` | block a host tool call the hook cannot check (a Codex patch aimed at another environment) |
 | `api-ok` / `api-approval` / `api-blocked` | per-operation decision for `api.call`, taken before any credential exists |
 | `api-unknown-operation` | block audience/operation pairs outside the policy (default-deny) |
 
@@ -141,20 +144,71 @@ model saw only the 3 registered ones, `read_text_file .env` was blocked, and
 CI against `examples/fs_mcp_server.py`, a deliberately naive server that does no path
 checking at all, so every block comes from the proxy.
 
+## Agent hooks (Claude Code, Codex)
+
+The MCP proxy never sees an agent host's built-in tools, and those are where the
+real risk is: Claude Code's `Bash`, `Read`, `Write`, `Edit`, Codex's shell and
+`apply_patch`. Both hosts run a `PreToolUse` hook before each tool call;
+`vt-agent-firewall-hook` is that hook. It translates the call into the same
+requests (`Bash` → `shell.run`, `Read` → `fs.read`, `Write`/`Edit` → `fs.write`,
+`WebFetch` → `net.request`, `mcp__*` → `mcp.call`), evaluates them with the same
+policy, writes the decision to the same audit log, and answers in the host's
+protocol:
+
+- `block` → deny (JSON on stdout and exit 2 with the reason on stderr);
+- `require_approval` → Claude Code's own permission prompt (`ask`); Codex cannot
+  ask from a hook, so there it is denied;
+- `allow` → silence, so the host's own permission rules still apply.
+
+Because the host runs `Bash` lines in a real shell, a line must first pass
+`sh-syntax`: one simple command whose words are exactly what the policy checked.
+Anything the hook cannot parse or map, an unreadable policy, an unavailable audit
+log, an internal error or its own deadline all deny. In a Claude Code settings
+file:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Monitor|Read|Write|Edit|MultiEdit|NotebookEdit|WebFetch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "vt-agent-firewall-hook --policy \"$CLAUDE_PROJECT_DIR/.claude/agent-firewall.json\" --base-dir \"$CLAUDE_PROJECT_DIR\" --audit \"$HOME/.local/state/vt-agent-firewall/audit.jsonl\"",
+            "timeout": 30,
+            "statusMessage": "Agent firewall"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+[docs/AGENT_HOOKS.md](docs/AGENT_HOOKS.md) covers install for both hosts, a smoke
+test, what it blocks, the protocol details it relies on, and its limits: it is
+policy, not OS isolation; whoever controls the settings can remove it; the host
+lets a tool run when the hook times out or cannot start; and only simple shell
+commands pass.
+
 ## Layout
 
 ```text
-agent_firewall/   models, config, policy, argv (per-binary grammars), executor,
-                  audit, approval, gateway, credentials (token broker), mock_apis,
-                  mcp_proxy
+agent_firewall/   models, config, policy, argv (per-binary grammars), shell_syntax,
+                  executor, audit, approval, gateway, credentials (token broker),
+                  mock_apis, mcp_proxy, hook (Claude Code / Codex PreToolUse)
 corpus/           attacks.json: synthetic injections and their expected decisions
 policies/         default.json: sandbox, protected paths, allowlists, MCP registry
 scripts/          run_demo.py, mock_receiver.py, run_corpus.py, score_model_following.py
-examples/         fs_mcp_server.py (a naive MCP server for tests and demos)
+examples/         fs_mcp_server.py (a naive MCP server for tests and demos);
+                  hooks/ (Claude Code settings, Codex config, a project policy)
 tests/            acceptance tests AC1–AC12, test_delegation.py (the four OAuth failure
                   modes), test_mcp_proxy.py (a real MCP server over stdio),
-                  test_bypasses.py (every bypass found in review, as a regression)
-docs/             THREAT_MODEL.md; build-prompts/ (how the first version was scaffolded)
+                  test_bypasses.py (every bypass found in review, as a regression),
+                  test_hook.py (the PreToolUse hook, from synthetic events)
+docs/             THREAT_MODEL.md, AGENT_HOOKS.md; build-prompts/ (how the first
+                  version was scaffolded)
 demo_workspace/   synthetic sandbox for the demo
 ```
 
@@ -171,6 +225,10 @@ These are deliberate v0 boundaries, not hidden ones:
 - **The demo agent is a scripted list of requests.** The MCP proxy is real; the demo
   still uses the simulated `demo` MCP server.
 - **The MCP proxy handles one call at a time** and only covers stdio servers.
+- **The agent hook is policy, not isolation.** It decides whether a host tool call
+  may start; whoever controls the host's settings can remove it, the host runs the
+  tool anyway when the hook times out or cannot start, and aliases or `PATH` decide
+  what an allowlisted name really runs. See [docs/AGENT_HOOKS.md](docs/AGENT_HOOKS.md#limits).
 - **The shell grammars follow GNU userland** (coreutils, grep, findutils). Binaries
   added without a grammar get a conservative fallback. See the
   [threat model](docs/THREAT_MODEL.md#known-limitations) for the rest.
@@ -184,12 +242,13 @@ These are deliberate v0 boundaries, not hidden ones:
 
 ## Reproducible attack corpus
 
-`corpus/attacks.json` records twenty-one synthetic untrusted instructions (two of
+`corpus/attacks.json` records twenty-six synthetic untrusted instructions (three of
 them benign controls), their resulting tool requests and the expected decision and
 rule. Since 0.1.1 it includes the bypass classes found in review: recursive reads
 that reach a secret without naming it, file-valued options, a `find` action that
 writes, a child of a protected directory, and MCP arguments outside the sandbox or
-under an unexpected name. A case can add symlinks (`setup.symlinks`) or protected
+under an unexpected name. Since 0.2.0 it includes lines a host shell would expand
+(`via_shell`): chaining, a glob, command substitution and a redirect. A case can add symlinks (`setup.symlinks`) or protected
 paths (`policy.protected_paths_add`) to its own workspace. `scripts/run_corpus.py`
 gives each case a fresh temporary workspace and gateway session, checks every
 decision and audit record, and verifies that the canary was not changed. The
@@ -204,7 +263,8 @@ Keep traces synthetic and do not include raw prompts, tool arguments, or secrets
 ## Roadmap
 
 v0.1.0 shipped the gateway, the token broker with the four OAuth failure modes, and
-the MCP proxy; v0.1.1 closes the bypasses found in review ([CHANGELOG](CHANGELOG.md)).
+the MCP proxy; v0.1.1 closes the bypasses found in review; v0.2.0 adds the
+`PreToolUse` hook for Claude Code and Codex ([CHANGELOG](CHANGELOG.md)).
 Next:
 
 1. Sender-constrained tokens (DPoP), so a stolen access token is useless.

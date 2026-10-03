@@ -21,11 +21,15 @@ the one this project owns.
  ───────────────────────────────────┼──────────────────────────────────────────
  model output, spelled params,      │ normalized params, policy file,
  content the agent reads,           │ human approval on the terminal,
- MCP server results, tools/list     │ audit log (outside the sandbox), executor
+ MCP server results, tools/list,    │ audit log (outside the sandbox), executor,
+ host tool calls (hook stdin)       │ the host's settings that install the hook
 ```
 
 Spelled parameters never cross the boundary: the executor only receives what the
-normalizer produced and the policy approved.
+normalizer produced and the policy approved. With the agent hook the host, not the
+executor, runs the tool, so the guarantee is weaker: the hook can only refuse what
+it cannot vouch for, and it trusts the host to honor the answer and to keep the
+hook installed (see [docs/AGENT_HOOKS.md](AGENT_HOOKS.md#limits)).
 
 ## Attacker capabilities considered
 
@@ -41,6 +45,11 @@ normalizer produced and the policy approved.
 8. Protocol tricks against the MCP proxy: path arguments under any name, paths
    outside the sandbox, `resources/read`, JSON-RPC batches, and `tools/call` sent
    as a notification.
+9. Host shell tricks against the agent hook: a line that an agent host's Bash tool
+   hands to a real shell, where `;`, pipes, redirects, `$(...)`, variables, globs,
+   braces and `~` would change what runs after the argv was checked; patches that
+   name files under a misleading spelling; and malformed hook input meant to make
+   the hook crash (a crash would let the host run the tool).
 
 ## Mapping to OWASP
 
@@ -64,10 +73,10 @@ Status: **Implemented** (covered by tests or the demo), **Partial**, **Planned**
 | Risk | How the gateway addresses it | Status |
 |---|---|---|
 | ASI01 Agent Goal Hijack | Same containment as LLM01: a hijacked goal still has to pass the policy. | Implemented (containment) |
-| ASI02 Tool Misuse and Exploitation | Every tool call is a typed request with per-tool checks; unknown tools are denied. | Implemented |
+| ASI02 Tool Misuse and Exploitation | Every tool call is a typed request with per-tool checks; unknown tools are denied. The agent hook applies the same checks to Claude Code's and Codex's built-in tools before the host runs them. | Implemented (hook: Partial, see limitations) |
 | ASI03 Identity and Privilege Abuse | Token broker: short-lived tokens scoped per call and audience, the agent never holds a refresh token, and the audit record ties each call to user, agent and token `jti`. Not sender-constrained yet (no DPoP). | Implemented |
 | ASI04 Agentic Supply Chain Vulnerabilities | The MCP proxy hides and blocks unregistered tools, checks every path-like argument, denies resources by default, relays only known methods, and can refuse to start a server whose code does not match a pinned SHA-256 (at launch only). No signature verification of packages. | Partial |
-| ASI05 Unexpected Code Execution | Shell allowlist; each allowlisted binary has an argument grammar, so unknown options are refused and `find` only accepts allowlisted predicates (no `-exec`, `-ok`, `-fprint`, `-delete`); argv, option-value and recursive-walk path checks; `shell=False`, stdin from `/dev/null`. Every bypass found in review is a regression test and a corpus case. | Implemented (GNU userland; see limitations) |
+| ASI05 Unexpected Code Execution | Shell allowlist; each allowlisted binary has an argument grammar, so unknown options are refused and `find` only accepts allowlisted predicates (no `-exec`, `-ok`, `-fprint`, `-delete`); argv, option-value and recursive-walk path checks; `shell=False`, stdin from `/dev/null`. A line a host shell will run (`via_shell`) must be one simple command with nothing to expand (`sh-syntax`). Every bypass found in review is a regression test and a corpus case. | Implemented (GNU userland; see limitations) |
 | ASI06 Memory and Context Poisoning | The gateway keeps no agent memory. | Out of scope |
 | ASI07 Insecure Inter-Agent Communication | Single agent only. | Out of scope |
 | ASI08 Cascading Failures | Fail-closed: a parser error denies; an audit failure poisons the gateway and denies everything afterwards. | Partial |
@@ -119,3 +128,11 @@ attack works, and the same attack stopped by the gateway and the broker.
   (`npx -y`) can change after the check.
 - No TOCTOU protection between normalization and execution.
 - Access tokens are bearer tokens (no DPoP): a stolen one works until it expires (5 minutes).
+- The agent hook is a policy check, not isolation: an allowed binary runs with the
+  host's full rights. Whoever controls the host's settings can remove or disable
+  it, and the host runs the tool when the hook times out or cannot start; only the
+  hook's own failures after it starts are fail-closed. Aliases, shell functions and
+  `PATH` decide what an allowlisted name runs. Codex gives the hook the session
+  `cwd`, not a command's `workdir`. Each hook call is its own session, so taint does
+  not carry across calls, and the audit records a request for approval, not the
+  human's answer. Details: [docs/AGENT_HOOKS.md](AGENT_HOOKS.md#limits).
