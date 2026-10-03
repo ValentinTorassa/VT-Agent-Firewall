@@ -12,6 +12,10 @@ Ordering invariants:
   startup, every request is denied with `fail-closed`.
 - Audit records keep a SHA-256 and length for written content and at most a
   short preview of network bodies, unless verbose audit is enabled.
+- `decide()` is the same pipeline without the executor, for an agent host that
+  runs its own tools (the Claude Code / Codex hook). An allowed action gets a
+  durable `delegated` record before the host may run it; the gateway never
+  sees the result, so there is no `executed` record to pair it with.
 """
 
 from __future__ import annotations
@@ -70,12 +74,7 @@ class Gateway:
         the result (the MCP proxy) need all of it.
         """
         if self._broken:
-            decision = PolicyDecision(
-                request=req, decision=Decision.BLOCK, rule_id="fail-closed",
-                reason="audit store unavailable; refusing to act unaudited",
-                risk="high", rules_matched=["fail-closed"], normalized={},
-            )
-            return self._record(decision, outcome="not_executed"), None
+            return self._record(self._fail_closed(req), outcome="not_executed"), None
 
         decision = self.policy.evaluate(req, self.session)
 
@@ -84,10 +83,7 @@ class Gateway:
                 decision.decision = Decision.ALLOW
                 decision.rules_matched.append("approval-granted")
             else:
-                decision.decision = Decision.BLOCK
-                decision.rules_matched.append("approval-denied")
-                decision.rule_id = "approval-denied"
-                decision.reason += "; human denied or approval timed out"
+                self._deny_approval(decision, "human denied or approval timed out")
 
         if decision.decision == Decision.BLOCK:
             # Audit-first: the attempt is recorded before we return.
@@ -115,6 +111,51 @@ class Gateway:
         except Exception as e:  # executor errors are audited, not hidden
             return self._record(decision, outcome="error", action_id=action_id,
                                 error=str(e)), None
+
+    def decide(self, req: ActionRequest, approval: str = "delegate",
+               approval_note: str = "no approval channel", **extra) -> dict:
+        """Decide and audit, never execute: the agent host runs the tool.
+
+        `approval="delegate"` leaves `require_approval` for the host to ask a
+        human (the hook answers "ask"); anything else turns it into
+        `approval-denied` with `approval_note` as the reason. `extra` fields
+        (host, session, tool name) go into the audit record.
+        """
+        if self._broken:
+            return self._record(self._fail_closed(req), outcome="not_executed", **extra)
+        decision = self.policy.evaluate(req, self.session)
+        if decision.decision == Decision.REQUIRE_APPROVAL and approval != "delegate":
+            self._deny_approval(decision, approval_note)
+        if decision.decision == Decision.BLOCK:
+            return self._record(decision, outcome="not_executed", **extra)
+        try:
+            # Durable before the host may act, like the executor's intent record.
+            return self._record(decision, outcome="delegated", strict=True, **extra)
+        except AuditUnavailable:
+            return self._unrecorded_block(decision, uuid.uuid4().hex)
+
+    def refuse(self, req: ActionRequest, rule_id: str, reason: str, **extra) -> dict:
+        """Audit a request that never reached the policy because it could not
+        be translated into one (malformed input). Always a block."""
+        decision = PolicyDecision(request=req, decision=Decision.BLOCK,
+                                  rule_id=rule_id, reason=reason, risk="high",
+                                  rules_matched=[rule_id], normalized={})
+        return self._record(decision, outcome="not_executed", **extra)
+
+    @staticmethod
+    def _fail_closed(req: ActionRequest) -> PolicyDecision:
+        return PolicyDecision(
+            request=req, decision=Decision.BLOCK, rule_id="fail-closed",
+            reason="audit store unavailable; refusing to act unaudited",
+            risk="high", rules_matched=["fail-closed"], normalized={},
+        )
+
+    @staticmethod
+    def _deny_approval(decision: PolicyDecision, note: str) -> None:
+        decision.decision = Decision.BLOCK
+        decision.rules_matched.append("approval-denied")
+        decision.rule_id = "approval-denied"
+        decision.reason += f"; {note}"
 
     def _unrecorded_block(self, decision: PolicyDecision, action_id: str) -> dict:
         return {
