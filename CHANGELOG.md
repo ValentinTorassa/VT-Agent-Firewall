@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0 — unreleased
+## 0.2.0 — 2026-10-04
 
 The policy now reaches an agent host's built-in tools, not only MCP tools.
 
