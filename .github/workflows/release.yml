@@ -8,6 +8,11 @@ on:
         description: 'Existing tag to (re)publish, e.g. v0.1.0'
         required: true
 
+# Jobs get read access unless they ask for more: github-release writes the
+# release, pypi gets the OIDC token.
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
