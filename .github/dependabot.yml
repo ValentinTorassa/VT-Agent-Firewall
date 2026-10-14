@@ -1,0 +1,25 @@
+version: 2
+updates:
+  # pyproject.toml: no dependencies today; covers the ones added later.
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    # Version updates wait a week so a compromised release has time to be
+    # pulled; security updates are not delayed.
+    cooldown:
+      default-days: 7
+    groups:
+      python-packages:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns: ["*"]
