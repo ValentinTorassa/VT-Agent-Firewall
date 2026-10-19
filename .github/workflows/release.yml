@@ -15,7 +15,8 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest moves to Ubuntu 26.04 from 2026-10-19; change the image on purpose.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
         with:
@@ -42,7 +43,7 @@ jobs:
 
   github-release:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
@@ -68,7 +69,7 @@ jobs:
   pypi:
     needs: build
     if: vars.PYPI_PUBLISH == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: pypi
     permissions:
       id-token: write
