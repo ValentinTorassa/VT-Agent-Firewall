@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 — 2026-10-23
 
 Learning mode: observe a real session, then propose a policy instead of writing
 one from scratch.

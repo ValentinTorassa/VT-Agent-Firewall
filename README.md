@@ -23,7 +23,7 @@ than act unaudited.
 
 ![The same prompt-injected agent without the gateway (the fake key is exfiltrated) and through it (every attempt blocked and audited)](docs/demo.gif)
 
-**Status: alpha (0.2.0).** Standard library only, Python 3.11+. Built as the
+**Status: alpha (0.3.0).** Standard library only, Python 3.11+. Built as the
 reference implementation for the talk *"Dónde se rompe OAuth cuando el que llama es
 un agente"* (OWASP Village, Ekoparty 2026). Not production-ready; see
 [Limitations](#limitations).
@@ -31,7 +31,7 @@ un agente"* (OWASP Village, Ekoparty 2026). Not production-ready; see
 ## Quickstart
 
 ```bash
-pip install vt-agent-firewall   # library + vt-agent-firewall-mcp + vt-agent-firewall-hook (PyPI)
+pip install vt-agent-firewall   # library + vt-agent-firewall-mcp, -hook and -propose (PyPI)
 
 git clone https://github.com/ValentinTorassa/VT-Agent-Firewall   # to run the demo and tests
 cd VT-Agent-Firewall
@@ -307,7 +307,8 @@ Keep traces synthetic and do not include raw prompts, tool arguments, or secrets
 
 v0.1.0 shipped the gateway, the token broker with the four OAuth failure modes, and
 the MCP proxy; v0.1.1 closes the bypasses found in review; v0.2.0 adds the
-`PreToolUse` hook for Claude Code and Codex ([CHANGELOG](CHANGELOG.md)).
+`PreToolUse` hook for Claude Code and Codex; v0.3.0 adds learning mode, which records a
+session and proposes a policy ([CHANGELOG](CHANGELOG.md)).
 Next:
 
 1. Sender-constrained tokens (DPoP), so a stolen access token is useless.
