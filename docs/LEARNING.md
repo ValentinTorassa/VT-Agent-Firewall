@@ -92,7 +92,10 @@ it sorts each observation into one of the report's sections.
   `src/app/models/user.py` proposes `src`. Never the sandbox root, and never a
   hidden directory (`.git`, `.github`, `.claude`, ...), which hold VCS, CI or
   tool settings that can run code. Protected paths inside a proposed directory
-  stay blocked: `fs-protected` is checked first.
+  stay blocked: `fs-protected` is checked first. The first level is broad on
+  purpose, because you review the proposal before copying it. The stricter
+  alternative is the deepest directory the writes have in common
+  (`src/app/models`): if you want that, narrow the entry in the proposal by hand.
 - **A shell binary with an argument grammar** (`agent_firewall/argv.py`: `cat`,
   `head`, `tail`, `wc`, `ls`, `grep`, `find`). The grammar is what lets the
   firewall check every file the command may open and refuse every option it
