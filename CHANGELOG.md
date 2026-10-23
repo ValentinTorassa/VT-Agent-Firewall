@@ -1,5 +1,45 @@
 # Changelog
 
+## Unreleased
+
+Learning mode: observe a real session, then propose a policy instead of writing
+one from scratch.
+
+- **Recording (`vt-agent-firewall-hook --learn TRACE`):** one observation per
+  request in a JSONL trace (the normalized action, the policy's decision, the
+  session, and provenance: sandbox root, a digest of the policy file, the hook's
+  own protected files). Written content stays a digest, as in the audit log. The
+  trace is added to the protected paths, and a trace that cannot be written denies
+  (`fail-closed`).
+- **Two modes:** `--learn-mode enforce` (default) answers exactly as without
+  `--learn`. `--learn-mode ask` (Claude Code only) turns a refusal by
+  `sh-allowlist` or `mcp-unknown-tool` into Claude Code's prompt (`learn-ask`)
+  when the call passes every other check with that grant; every other refusal
+  stays a denial, and a session that named or reached a protected path is not
+  asked again. Audited as `require_approval` with the original rule in
+  `rules_matched`.
+- **Proposals (`vt-agent-firewall-propose`, `agent_firewall/learn.py`):** replays
+  the traces against the policy and writes a proposed policy and a report: each
+  grant with how often it was seen, in how many sessions, and examples. It only
+  proposes writable directories (the first one under the sandbox root, never the
+  root or a hidden directory) and binaries with an argument grammar. Binaries
+  without one (interpreters, network clients, binaries that write), MCP tools and
+  files in the root are listed for a human decision; protected paths, the
+  sandbox, network and forbidden arguments are copied unchanged. Observations
+  after a session's protected-path access and refusals at approval are not
+  learned from. The proposal is replayed against every observation and refused
+  if any other decision got looser; it is never written over the policy.
+  `--drop-unused` also removes allowlisted binaries and writable directories no
+  observation used.
+- `Gateway.decide(relax=...)` lets a caller turn a decision into an
+  approval-gated one before it is audited (never into an allow), and
+  `Config.from_raw` builds a config from a parsed policy.
+- Docs: `docs/LEARNING.md` (modes, what is and is not proposed, a walkthrough on
+  `demo_workspace` with `scripts/run_learning_demo.py`, limits); README and
+  README.es.
+- Tests: `tests/test_learn.py` (recording, ask mode, proposals, the CLI, and the
+  whole attack corpus learned case by case without a single grant).
+
 ## 0.2.0 — 2026-10-04
 
 The policy now reaches an agent host's built-in tools, not only MCP tools.

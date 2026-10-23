@@ -54,6 +54,7 @@ python3 scripts/run_demo.py                # el ataque, a través del gateway
 python3 scripts/run_demo.py --no-firewall  # contraste: el mismo ataque sin el gateway
 python3 -m unittest discover -s tests -v   # AC1–AC12, los modos de falla de OAuth, regresiones de bypass
 python3 scripts/run_corpus.py              # 26 casos sintéticos de inyección, aislados
+python3 scripts/run_learning_demo.py       # modo aprendizaje: registra una sesión, propone una política
 python3 scripts/run_demo.py --reset        # trunca logs/audit.jsonl y restaura el canary
 ```
 
@@ -86,6 +87,7 @@ datos de `demo_workspace/` son carnada sintética.
 | `fail-closed` | block: todo, cuando el audit store no está disponible |
 | `unknown-tool` / `parse-error` | block: una herramienta sin política y un pedido que no se puede parsear (default-deny) |
 | `hook-unsupported` | block: una llamada del host que el hook no puede chequear (un patch de Codex para otro environment) |
+| `learn-ask` | require_approval, sólo en el modo aprendizaje `ask`: una llamada rechazada únicamente por `sh-allowlist` o `mcp-unknown-tool` que nada más rechaza |
 | `api-ok` / `api-approval` / `api-blocked` | decisión por operación para `api.call`, tomada antes de que exista una credencial |
 | `api-unknown-operation` | block: pares audience/operación fuera de la política (default-deny) |
 
@@ -210,25 +212,62 @@ y sus límites: es política, no aislamiento del sistema operativo; quien contro
 settings puede sacarlo; el host deja correr la herramienta si el hook se pasa del
 timeout o no arranca; y sólo pasan comandos de shell simples.
 
+## Modo aprendizaje
+
+Escribir una política de mínimo privilegio desde cero es difícil, y por eso se
+termina en allow-all. Con `--learn TRACE` el hook además registra cada pedido y lo
+que decidió la política; `vt-agent-firewall-propose` reproduce la traza contra la
+política y escribe una política propuesta con un reporte. No se aplica nada: el
+comando nunca escribe sobre la política.
+
+```bash
+# en el comando del hook: ... --learn ~/.local/state/vt-agent-firewall/learn.jsonl
+vt-agent-firewall-propose --policy .claude/agent-firewall.json --base-dir . \
+  --out proposed.json ~/.local/state/vt-agent-firewall/learn.jsonl
+python3 scripts/run_learning_demo.py   # el circuito completo sobre demo_workspace
+```
+
+- **Mientras aprende, la política se sigue aplicando** (`--learn-mode enforce`, el
+  default). `--learn-mode ask` (sólo Claude Code) convierte un rechazo de la
+  allowlist de shell o del registry MCP en el prompt de Claude Code cuando nada más
+  en la política rechaza la llamada. No te protege de lo que aprobás, y deja de
+  preguntar en cuanto la sesión fue por un path protegido.
+- **La propuesta sólo agrega lo que el firewall puede acotar:** un directorio
+  escribible (el primero debajo de la raíz del sandbox, nunca la raíz ni un
+  directorio oculto) y binarios con gramática de argumentos. Intérpretes, clientes
+  de red, binarios que escriben, tools MCP y archivos en la raíz quedan listados
+  para que decidas vos, con cuántas veces se vieron. Los paths protegidos, el
+  sandbox, la red y los argumentos prohibidos nunca se relajan.
+- **No todo es evidencia.** Lo que hizo una sesión después de nombrar o alcanzar un
+  path protegido, y lo que se rechazó en la aprobación, no se aprende. Antes de
+  imprimir, la propuesta se reproduce contra cada observación y se rechaza si
+  cualquier otra cosa quedó más permisiva.
+
+[docs/LEARNING.md](docs/LEARNING.md) (en inglés) tiene el recorrido con
+`demo_workspace`, el formato de la traza y los límites.
+
 ## Estructura
 
 ```text
 agent_firewall/   models, config, policy, argv (gramáticas por binario), shell_syntax,
                   executor, audit, approval, gateway, credentials (token broker),
-                  mock_apis, mcp_proxy, hook (PreToolUse de Claude Code / Codex)
+                  mock_apis, mcp_proxy, hook (PreToolUse de Claude Code / Codex),
+                  learn (modo aprendizaje: trazas y propuestas de política)
 corpus/           attacks.json: inyecciones sintéticas y la decisión esperada
 policies/         default.json: sandbox, paths protegidos, allowlists, registry MCP
-scripts/          run_demo.py, mock_receiver.py, run_corpus.py, score_model_following.py
+scripts/          run_demo.py, mock_receiver.py, run_corpus.py, score_model_following.py,
+                  run_learning_demo.py
 examples/         fs_mcp_server.py (un servidor MCP ingenuo para tests y demos);
                   hooks/ (settings de Claude Code, config de Codex, una política de proyecto)
 tests/            tests de aceptación AC1–AC12, test_delegation.py (los cuatro modos
                   de falla de OAuth), test_mcp_proxy.py (un servidor MCP real por
                   stdio), test_bypasses.py (cada bypass encontrado en la revisión,
                   como regresión), test_hook.py (el hook PreToolUse, con eventos
-                  sintéticos)
+                  sintéticos), test_learn.py (modo aprendizaje: registro, modo ask,
+                  propuestas)
 logs/             audit.jsonl (fuera del sandbox, append-only)
-docs/             THREAT_MODEL.md, AGENT_HOOKS.md; build-prompts/ (cómo se armó la
-                  primera versión)
+docs/             THREAT_MODEL.md, AGENT_HOOKS.md, LEARNING.md; build-prompts/ (cómo
+                  se armó la primera versión)
 demo_workspace/   sandbox sintético para la demo
 ```
 
@@ -252,6 +291,10 @@ Son límites deliberados de la v0, no ocultos:
   la herramienta igual si el hook se pasa del timeout o no arranca, y los alias o el
   `PATH` deciden qué corre de verdad bajo un nombre permitido. Ver
   [docs/AGENT_HOOKS.md](docs/AGENT_HOOKS.md#limits).
+- **El modo aprendizaje propone; no juzga intenciones.** Una sesión que nunca tocó
+  un path protegido parece trabajo aunque la maneje una inyección, y el hook no ve
+  tu respuesta a un prompt. Revisá cada permiso y sus ejemplos. Ver
+  [docs/LEARNING.md](docs/LEARNING.md#limits).
 - **Las gramáticas de shell siguen la userland GNU** (coreutils, grep, findutils). Un
   binario agregado sin gramática usa un fallback conservador. El resto está en el
   [modelo de amenazas](docs/THREAT_MODEL.md#known-limitations).

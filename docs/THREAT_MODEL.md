@@ -128,6 +128,13 @@ attack works, and the same attack stopped by the gateway and the broker.
   (`npx -y`) can change after the check.
 - No TOCTOU protection between normalization and execution.
 - Access tokens are bearer tokens (no DPoP): a stolen one works until it expires (5 minutes).
+- Learning mode records what an agent attempted, including what an injection made
+  it attempt. The proposal never relaxes a safety rule, grants only writable
+  directories and binaries with a grammar, and does not learn from a session after
+  it went for a protected path or from a refusal at approval; anything else a
+  hijacked session did looks like work, so a human reviews every grant
+  ([LEARNING.md](LEARNING.md#limits)). `--learn-mode ask` lets a human approve
+  calls the allowlist or the MCP registry would refuse.
 - The agent hook is a policy check, not isolation: an allowed binary runs with the
   host's full rights. Whoever controls the host's settings can remove or disable
   it, and the host runs the tool when the hook times out or cannot start; only the

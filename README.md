@@ -40,6 +40,7 @@ python3 scripts/run_demo.py                # the attack, through the gateway
 python3 scripts/run_demo.py --no-firewall  # contrast: the same attack without it
 python3 -m unittest discover -s tests -v   # AC1–AC12, the OAuth failure modes, bypass regressions
 python3 scripts/run_corpus.py              # 26 isolated synthetic injection cases
+python3 scripts/run_learning_demo.py       # learning mode: record a session, propose a policy
 ```
 
 ## The demo
@@ -71,6 +72,7 @@ All data in `demo_workspace/` is synthetic bait.
 | `fail-closed` | block everything when the audit store is unavailable |
 | `unknown-tool` / `parse-error` | block a tool with no policy and a request that cannot be parsed (default-deny) |
 | `hook-unsupported` | block a host tool call the hook cannot check (a Codex patch aimed at another environment) |
+| `learn-ask` | learning mode `ask` only: require approval for a call refused only by `sh-allowlist` or `mcp-unknown-tool` that nothing else refuses |
 | `api-ok` / `api-approval` / `api-blocked` | per-operation decision for `api.call`, taken before any credential exists |
 | `api-unknown-operation` | block audience/operation pairs outside the policy (default-deny) |
 
@@ -192,23 +194,60 @@ policy, not OS isolation; whoever controls the settings can remove it; the host
 lets a tool run when the hook times out or cannot start; and only simple shell
 commands pass.
 
+## Learning mode
+
+A least-privilege policy is hard to write from scratch, so people fall back to
+allow-all. With `--learn TRACE` the hook also records every request and what the
+policy decided; `vt-agent-firewall-propose` replays the trace against the policy
+and writes a proposed policy with a report. Nothing is applied: the command never
+writes over the policy.
+
+```bash
+# in the hook command: ... --learn ~/.local/state/vt-agent-firewall/learn.jsonl
+vt-agent-firewall-propose --policy .claude/agent-firewall.json --base-dir . \
+  --out proposed.json ~/.local/state/vt-agent-firewall/learn.jsonl
+python3 scripts/run_learning_demo.py   # the whole loop on demo_workspace
+```
+
+- **The policy is still enforced while learning** (`--learn-mode enforce`, the
+  default). `--learn-mode ask` (Claude Code only) turns a refusal by the shell
+  allowlist or the MCP registry into Claude Code's prompt when nothing else in
+  the policy refuses the call. It does not protect you from what you approve,
+  and it stops asking once the session has gone for a protected path.
+- **The proposal only adds what the firewall can bound:** a writable directory
+  (the first one under the sandbox root, never the root or a hidden directory)
+  and binaries with an argument grammar. Interpreters, network clients, binaries
+  that write, MCP tools and files in the root are listed for your decision, with
+  how often they were seen. Protected paths, the sandbox, network and forbidden
+  arguments are never relaxed.
+- **Not everything is evidence.** What a session did after it named or reached a
+  protected path, and what was refused at approval, is not learned from. Before
+  printing, the proposal is replayed against every observation and refused if
+  anything else got looser.
+
+[docs/LEARNING.md](docs/LEARNING.md) has the walkthrough with `demo_workspace`,
+the trace format and the limits.
+
 ## Layout
 
 ```text
 agent_firewall/   models, config, policy, argv (per-binary grammars), shell_syntax,
                   executor, audit, approval, gateway, credentials (token broker),
-                  mock_apis, mcp_proxy, hook (Claude Code / Codex PreToolUse)
+                  mock_apis, mcp_proxy, hook (Claude Code / Codex PreToolUse),
+                  learn (learning mode: traces and policy proposals)
 corpus/           attacks.json: synthetic injections and their expected decisions
 policies/         default.json: sandbox, protected paths, allowlists, MCP registry
-scripts/          run_demo.py, mock_receiver.py, run_corpus.py, score_model_following.py
+scripts/          run_demo.py, mock_receiver.py, run_corpus.py, score_model_following.py,
+                  run_learning_demo.py
 examples/         fs_mcp_server.py (a naive MCP server for tests and demos);
                   hooks/ (Claude Code settings, Codex config, a project policy)
 tests/            acceptance tests AC1–AC12, test_delegation.py (the four OAuth failure
                   modes), test_mcp_proxy.py (a real MCP server over stdio),
                   test_bypasses.py (every bypass found in review, as a regression),
-                  test_hook.py (the PreToolUse hook, from synthetic events)
-docs/             THREAT_MODEL.md, AGENT_HOOKS.md; build-prompts/ (how the first
-                  version was scaffolded)
+                  test_hook.py (the PreToolUse hook, from synthetic events),
+                  test_learn.py (learning mode: recording, ask mode, proposals)
+docs/             THREAT_MODEL.md, AGENT_HOOKS.md, LEARNING.md; build-prompts/ (how
+                  the first version was scaffolded)
 demo_workspace/   synthetic sandbox for the demo
 ```
 
@@ -229,6 +268,10 @@ These are deliberate v0 boundaries, not hidden ones:
   may start; whoever controls the host's settings can remove it, the host runs the
   tool anyway when the hook times out or cannot start, and aliases or `PATH` decide
   what an allowlisted name really runs. See [docs/AGENT_HOOKS.md](docs/AGENT_HOOKS.md#limits).
+- **Learning mode proposes; it does not judge intent.** A session that never
+  touched a protected path looks like work even if an injection drove it, and the
+  hook does not see your answer to a prompt. Review each grant and its examples.
+  See [docs/LEARNING.md](docs/LEARNING.md#limits).
 - **The shell grammars follow GNU userland** (coreutils, grep, findutils). Binaries
   added without a grammar get a conservative fallback. See the
   [threat model](docs/THREAT_MODEL.md#known-limitations) for the rest.
