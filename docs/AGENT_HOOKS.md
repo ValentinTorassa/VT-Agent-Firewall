@@ -53,6 +53,10 @@ By default the hook only narrows what the host allows. `--emit-allow` (Claude
 Code only) answers an allowed call with an explicit `allow`, which skips Claude
 Code's prompt for that call; deny and ask rules in your settings still apply.
 
+`--learn TRACE` also records every decision for `vt-agent-firewall-propose`,
+which proposes a policy from what the agent attempted; the policy is still
+enforced unless you choose `--learn-mode ask`. See [LEARNING.md](LEARNING.md).
+
 Every decision is a line in the audit log, with `host`, `host_tool`,
 `session_id`, `permission_mode` and the host's `tool_use_id` as the
 `correlation_id`. An allowed or ask call is recorded with outcome `delegated`
