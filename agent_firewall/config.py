@@ -22,8 +22,18 @@ class Config:
         path = Path(path)
         raw = json.loads(path.read_text(encoding="utf-8"))
         base = Path(base_dir) if base_dir else path.resolve().parent.parent
-        base = base.resolve()
+        self._load(raw, base.resolve())
 
+    @classmethod
+    def from_raw(cls, raw: dict, base_dir: str | Path) -> "Config":
+        """A config from an already parsed policy (a proposal being checked)."""
+        cfg = cls.__new__(cls)
+        cfg._load(raw, Path(base_dir).resolve())
+        return cfg
+
+    def _load(self, raw: dict, base: Path) -> None:
+        # Relative policy paths resolve here; a proposal writes new ones the same way.
+        self.base_dir = base
         self.sandbox_root = self._abs(base, raw["sandbox_root"])
         self.protected = {self._abs(base, p) for p in raw["protected_paths"]}
         self.writable_dirs = [self._abs(base, d) for d in raw["writable_dirs"]]
