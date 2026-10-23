@@ -25,8 +25,14 @@ the host's own permission rules and prompts still apply: the hook only narrows.
 `require_approval` becomes Claude Code's `ask` prompt. Codex cannot ask from a
 hook (it ignores `ask` and runs the tool), so there it is denied.
 
+Learning mode (`--learn TRACE`, agent_firewall/learn.py) also appends one
+observation per request to TRACE for `vt-agent-firewall-propose`. The policy is
+still enforced; `--learn-mode ask` (Claude Code only) asks instead of denying a
+call refused only by the shell allowlist or the MCP registry.
+
 Fail-closed: unparseable input, a tool it cannot map, an unreadable policy, an
-unavailable audit log, an internal error or the hook's own deadline all deny.
+unavailable audit log or learning trace, an internal error or the hook's own
+deadline all deny.
 A denial is given both ways the hosts understand: JSON on stdout and exit code
 2 with the reason on stderr. Any other non-zero exit would let the tool run,
 so every error path ends in that same denial.
@@ -49,6 +55,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import learn
 from .audit import AuditLogger, AuditUnavailable
 from .gateway import Gateway
 from .models import ActionRequest
@@ -210,19 +217,46 @@ def evaluate(args: argparse.Namespace, raw: bytes) -> Verdict:
         reason = f"agent firewall: cannot load policy {args.policy}: {e}"
         _audit_without_policy(args.audit, host, reason)
         return Verdict("deny", reason)
+    trace = None
     try:
         # Self-protection: the agent may neither read nor rewrite the policy
-        # that judges it or the log that records it.
-        for own in (args.policy, args.audit):
-            gateway.config.protected.add(Path(os.path.realpath(own)))
-        return _evaluate_event(gateway, host, raw)
+        # that judges it, the log that records it or the trace a policy will
+        # be proposed from.
+        own = [Path(os.path.realpath(p)) for p in (args.policy, args.audit, args.learn)
+               if p]
+        gateway.config.protected.update(own)
+        if args.learn:
+            try:
+                trace = learn.TraceWriter(args.learn, args.learn_mode, gateway.config,
+                                          args.policy, self_protected=own)
+            except learn.TraceUnavailable as e:
+                req = ActionRequest(actor=host, tool=f"{host}:hook-input",
+                                    params={"input": _digest(raw)})
+                record = gateway.refuse(req, "fail-closed", f"{e}; failing closed",
+                                        host=host)
+                return Verdict("deny", _blocked(record))
+        return _evaluate_event(gateway, host, raw, trace)
     finally:
+        if trace is not None:
+            trace.close()
         if gateway.audit is not None:
             gateway.audit.close()
 
 
-def _evaluate_event(gateway: Gateway, host: str, raw: bytes) -> Verdict:
+def _evaluate_event(gateway: Gateway, host: str, raw: bytes,
+                    trace: learn.TraceWriter | None = None) -> Verdict:
     extra: dict = {"host": host}
+
+    def observed(record: dict) -> Verdict | None:
+        """Write the observation; a trace that cannot be written denies."""
+        if trace is None:
+            return None
+        try:
+            trace.observe(record, tainted=gateway.session.tainted)
+        except learn.TraceUnavailable as e:
+            return Verdict("deny", f"agent firewall: {e}; failing closed")
+        return None
+
     try:
         if len(raw) > MAX_INPUT_BYTES:
             raise Refusal(f"hook input is larger than {MAX_INPUT_BYTES} bytes")
@@ -245,7 +279,7 @@ def _evaluate_event(gateway: Gateway, host: str, raw: bytes) -> Verdict:
         surface = f"{host}:{extra.get('host_tool', 'hook-input')}"
         req = ActionRequest(actor=host, tool=surface, params={"input": _digest(raw)})
         record = gateway.refuse(req, refusal.rule_id, refusal.reason, **extra)
-        return Verdict("deny", _blocked(record))
+        return observed(record) or Verdict("deny", _blocked(record))
 
     if host == "claude-code" and extra.get("permission_mode") != "bypassPermissions":
         approval, note = "delegate", ""
@@ -256,9 +290,19 @@ def _evaluate_event(gateway: Gateway, host: str, raw: bytes) -> Verdict:
         approval, note = "deny", ("Codex hooks cannot ask for approval (Codex "
                                   "ignores permissionDecision ask), so it is denied")
 
+    # Ask mode stops asking once the session has gone for a protected path
+    # (the trace remembers it across hook calls) or has no id to check.
+    relax = None
+    if trace is not None and trace.mode == "ask" and extra.get("session_id") \
+            and not trace.session_tainted(extra["session_id"]):
+        relax = learn.ask_instead_of_block(gateway.config)
     asks: list[str] = []
     for req in requests:
-        record = gateway.decide(req, approval=approval, approval_note=note, **extra)
+        record = gateway.decide(req, approval=approval, approval_note=note,
+                                relax=relax, **extra)
+        failed = observed(record)
+        if failed:
+            return failed
         if record["decision"] == "block":
             return Verdict("deny", _blocked(record))
         if record["decision"] == "require_approval":
@@ -358,6 +402,16 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Claude Code only: answer an allowed call with an "
                              "explicit allow, which skips Claude Code's own "
                              "permission prompt (default: stay silent)")
+    parser.add_argument("--learn", metavar="TRACE",
+                        help="learning mode: also append one observation per "
+                             "request to TRACE (JSONL) for vt-agent-firewall-propose; "
+                             "the policy is still enforced")
+    parser.add_argument("--learn-mode", choices=learn.MODES, default="enforce",
+                        help="enforce (default): decide exactly as without --learn. "
+                             "ask (Claude Code only, NOT protective for what you "
+                             "approve): a call refused only by the shell allowlist or "
+                             "the MCP registry, that nothing else in the policy "
+                             "refuses, gets Claude Code's prompt instead of a denial")
     parser.add_argument("--deadline", type=float, default=DEFAULT_DEADLINE_SEC,
                         help="deny when the decision takes longer than this many "
                              f"seconds (default {DEFAULT_DEADLINE_SEC:g}); keep it "
@@ -373,6 +427,11 @@ def main(argv: list[str] | None = None, stdin=None, stdout=None, stderr=None) ->
     if args.emit_allow and args.host != "claude-code":
         build_parser().error("--emit-allow is for Claude Code only (Codex rejects "
                              "an allow without updatedInput)")
+    if args.learn_mode != "enforce" and not args.learn:
+        build_parser().error("--learn-mode needs --learn TRACE")
+    if args.learn_mode == "ask" and args.host != "claude-code":
+        build_parser().error("--learn-mode ask is for Claude Code only (Codex cannot "
+                             "ask from a hook, so every ask would be a denial)")
     try:
         with _deadline(args.deadline):
             raw = stdin.read(MAX_INPUT_BYTES + 1)

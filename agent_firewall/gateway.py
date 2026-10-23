@@ -113,17 +113,26 @@ class Gateway:
                                 error=str(e)), None
 
     def decide(self, req: ActionRequest, approval: str = "delegate",
-               approval_note: str = "no approval channel", **extra) -> dict:
+               approval_note: str = "no approval channel", relax=None,
+               **extra) -> dict:
         """Decide and audit, never execute: the agent host runs the tool.
 
         `approval="delegate"` leaves `require_approval` for the host to ask a
         human (the hook answers "ask"); anything else turns it into
-        `approval-denied` with `approval_note` as the reason. `extra` fields
-        (host, session, tool name) go into the audit record.
+        `approval-denied` with `approval_note` as the reason. `relax`, when
+        given, may turn the policy's decision into a stricter or an
+        approval-gated one before it is audited (learning mode's `ask`; it
+        never yields an allow). `extra` fields (host, session, tool name) go
+        into the audit record.
         """
         if self._broken:
             return self._record(self._fail_closed(req), outcome="not_executed", **extra)
         decision = self.policy.evaluate(req, self.session)
+        if relax is not None:
+            original = decision.decision
+            decision = relax(decision)
+            if decision.decision == Decision.ALLOW and original != Decision.ALLOW:
+                raise ValueError("relax may not turn a decision into an allow")
         if decision.decision == Decision.REQUIRE_APPROVAL and approval != "delegate":
             self._deny_approval(decision, approval_note)
         if decision.decision == Decision.BLOCK:

@@ -138,6 +138,12 @@ _FIND_NEWERXY = re.compile(r"^-newer([aBcm])([aBcmt])$")
 _FIND_PRE_OPTIONS = frozenset({"-H", "-L", "-P"})
 
 
+def has_grammar(binary: str) -> bool:
+    """True when the policy knows every file this binary may open and that it
+    neither writes nor runs anything (no fallback guessing)."""
+    return binary == "find" or binary in GRAMMARS
+
+
 def parse(binary: str, args: list[str]) -> ParsedArgv:
     if binary == "find":
         return _parse_find(args)
