@@ -5,7 +5,9 @@ allow-all. Learning mode starts from the policy you have and from what a real
 session attempted, observing before blocking:
 
     record    vt-agent-firewall-hook --learn TRACE appends one observation per
-              request: the normalized action and what the policy decided
+              request: the normalized action and what the policy decided.
+              Registered for PostToolUse too, it adds a `ran` record for each
+              tool call the host ran, so an ask counts only once you said yes
     propose   vt-agent-firewall-propose replays the observations against the
               policy and writes a proposed policy and a report; it never
               applies anything
@@ -39,7 +41,7 @@ relaxed: protected paths, the sandbox, network, forbidden arguments and API
 decisions are copied unchanged, and the proposal is replayed against every
 observation to check it. What a session attempted after it named or reached a
 protected path is not used as evidence: that session may be following an
-injection.
+injection. Neither is an ask without a `ran` record: the human may have said no.
 """
 
 from __future__ import annotations
@@ -51,6 +53,7 @@ import json
 import os
 import shlex
 import sys
+import time
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -62,7 +65,11 @@ from .models import ActionRequest, Decision, PolicyDecision
 from .policy import PolicyEngine
 from .session import SessionState
 
-TRACE_VERSION = 1
+# Version 2 adds `kind`: "decision" (one per request, as in version 1) or "ran"
+# (the host ran a tool call: a PostToolUse event). Version 1 traces still read;
+# they have no `ran` records, so none of their asks counts as evidence.
+TRACE_VERSION = 2
+READABLE_VERSIONS = (1, 2)
 MODES = ("enforce", "ask")
 # The only refusals a policy edit could lift, so the only ones `ask` mode asks
 # about. Everything else is refused for a reason no observation can change.
@@ -124,7 +131,8 @@ class TraceWriter:
     An observation keeps what the audit record keeps (normalized params, written
     content as a digest) plus what the proposal checks: the recording mode, the
     sandbox root, a digest of the policy file and the paths the hook protected
-    at run time (the policy, the audit log, the trace itself).
+    at run time (the policy, the audit log, the trace itself). `ran()` appends
+    the record of a tool call the host ran (PostToolUse).
     """
 
     def __init__(self, path: str | Path, mode: str, config: Config,
@@ -147,6 +155,7 @@ class TraceWriter:
         decision = record.get("decision")
         observation = {
             "v": TRACE_VERSION,
+            "kind": "decision",
             "ts": record.get("ts"),
             "mode": self.mode,
             "host": record.get("host"),
@@ -160,12 +169,37 @@ class TraceWriter:
             "rule_id": record.get("rule_id") or "fail-closed",
             "rules_matched": record.get("rules_matched", []),
             "tainted": bool(tainted),
-            "sandbox_root": self.sandbox_root,
-            "policy_sha256": self.policy_sha256,
-            "self_protected": self.self_protected,
+            **self._provenance(),
         }
+        self._write(observation)
+
+    def ran(self, host: str, host_tool: str, session_id: str,
+            correlation_id: str) -> None:
+        """The host ran this tool call (PostToolUse): the call's ids only.
+
+        It never holds the tool's input or output (`tool_response` can carry a
+        file's contents); the proposal matches it to the decision by session,
+        tool_use_id and tool name.
+        """
+        self._write({
+            "v": TRACE_VERSION,
+            "kind": "ran",
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "mode": self.mode,
+            "host": host,
+            "host_tool": host_tool,
+            "session_id": session_id,
+            "correlation_id": correlation_id,
+            **self._provenance(),
+        })
+
+    def _provenance(self) -> dict:
+        return {"sandbox_root": self.sandbox_root, "policy_sha256": self.policy_sha256,
+                "self_protected": self.self_protected}
+
+    def _write(self, line: dict) -> None:
         try:
-            self._log.log(observation)
+            self._log.log(line)
         except OSError as e:
             raise TraceUnavailable(f"cannot write learning trace: {e}") from e
 
@@ -276,10 +310,21 @@ class Observation:
     host_tool: str | None
     policy_sha256: str | None
     self_protected: list[str]
+    ran: bool = False          # a `ran` record (PostToolUse) matches it
+
+    @property
+    def asked(self) -> bool:
+        """Recorded as an ask: the host prompted a human, who may have said no."""
+        return self.recorded[0] == "require_approval"
 
 
 def read_traces(paths, sandbox_root: Path) -> list[Observation]:
+    """Decision observations from every trace, each marked `ran` when a `ran`
+    record with the same session, tool_use_id and tool name exists in any of
+    them."""
     observations: list[Observation] = []
+    keys: list[tuple | None] = []
+    ran: set[tuple] = set()
     for path in paths:
         try:
             lines = Path(path).read_text(encoding="utf-8").splitlines()
@@ -293,8 +338,23 @@ def read_traces(paths, sandbox_root: Path) -> list[Observation]:
                 raw = json.loads(line)
             except json.JSONDecodeError as e:
                 raise TraceError(f"{where}: not JSON ({e.msg})") from None
-            if not isinstance(raw, dict) or raw.get("v") != TRACE_VERSION:
-                raise TraceError(f"{where}: not a version {TRACE_VERSION} trace record")
+            if not isinstance(raw, dict) or raw.get("v") not in READABLE_VERSIONS:
+                raise TraceError(f"{where}: not a trace record of version "
+                                 f"{' or '.join(map(str, READABLE_VERSIONS))}")
+            if raw.get("sandbox_root") != str(sandbox_root):
+                raise TraceError(f"{where}: recorded with sandbox "
+                                 f"{raw.get('sandbox_root')}, but this policy's sandbox "
+                                 f"is {sandbox_root} (use the hook's --base-dir)")
+            kind = raw.get("kind", "decision")        # version 1 has decisions only
+            if kind == "ran":
+                key = _ran_key(raw)
+                if key is None:
+                    raise TraceError(f"{where}: a ran record needs session_id, "
+                                     f"correlation_id and host_tool")
+                ran.add(key)
+                continue
+            if kind != "decision":
+                raise TraceError(f"{where}: unknown record kind {kind!r}")
             if not (isinstance(raw.get("tool"), str)
                     and isinstance(raw.get("normalized"), dict)
                     and raw.get("mode") in MODES
@@ -303,10 +363,6 @@ def read_traces(paths, sandbox_root: Path) -> list[Observation]:
                     and isinstance(raw.get("self_protected", []), list)):
                 raise TraceError(f"{where}: missing or invalid tool, normalized, mode, "
                                  f"decision or rule_id")
-            if raw.get("sandbox_root") != str(sandbox_root):
-                raise TraceError(f"{where}: recorded with sandbox "
-                                 f"{raw.get('sandbox_root')}, but this policy's sandbox "
-                                 f"is {sandbox_root} (use the hook's --base-dir)")
             session = raw.get("session_id")
             if not isinstance(session, str) or not session:
                 session = f"{path} (no session id)"
@@ -318,7 +374,18 @@ def read_traces(paths, sandbox_root: Path) -> list[Observation]:
                 policy_sha256=raw.get("policy_sha256"),
                 self_protected=[p for p in raw.get("self_protected", [])
                                 if isinstance(p, str)]))
+            keys.append(_ran_key(raw))
+    for obs, key in zip(observations, keys):
+        obs.ran = key is not None and key in ran
     return observations
+
+
+def _ran_key(raw: dict) -> tuple | None:
+    """What ties a `ran` record to its decision: the host's session, its
+    tool_use_id (the decision's correlation_id) and the tool name. A record
+    without all three matches nothing."""
+    key = (raw.get("session_id"), raw.get("correlation_id"), raw.get("host_tool"))
+    return key if all(isinstance(k, str) and k for k in key) else None
 
 
 def replay_request(obs: Observation) -> ActionRequest | None:
@@ -438,6 +505,7 @@ def propose(policy_path: str | Path, trace_paths, base_dir: str | Path | None = 
         return groups.setdefault((section, field_, key), Group(section, field_, key, why))
 
     tainted_by: dict[str, str] = {}
+    unconfirmed = 0                  # asks no `ran` record confirms
     used_bins: set[str] = set()
     used_dirs: set[Path] = set()
     new_dirs: set[Path] = set()
@@ -461,7 +529,14 @@ def propose(policy_path: str | Path, trace_paths, base_dir: str | Path | None = 
         if before.tainted and obs.session not in tainted_by:
             tainted_by[obs.session] = example
         clean = obs.session not in tainted_by
-        evidence.append(clean and not refused)
+        # An ask is a yes only if the host then ran the call: without a `ran`
+        # record the human may have said no (or the call failed or never came).
+        confirmed = obs.ran or not obs.asked
+        unconfirmed += not confirmed
+        evidence.append(clean and not refused and confirmed)
+        untrusted = (f"session {obs.session}, after {tainted_by[obs.session]}"
+                     if not clean else None if confirmed
+                     else "asked, and no PostToolUse record shows it was approved and ran")
         d = before.policy
 
         if refused:
@@ -482,10 +557,8 @@ def propose(policy_path: str | Path, trace_paths, base_dir: str | Path | None = 
         if before.rule_id == "fs-write-scope" and d is not None:
             path = Path(d.normalized["path"])
             target, why = _writable_candidate(config, path)
-            if not clean:
-                group("untrusted", "writable_dirs", example,
-                      f"session {obs.session}, after {tainted_by[obs.session]}"
-                      ).add(obs, example)
+            if untrusted:
+                group("untrusted", "writable_dirs", example, untrusted).add(obs, example)
             elif target is None:
                 group("decide", "writable_dirs", show(path), why).add(obs, example)
             else:
@@ -505,10 +578,8 @@ def propose(policy_path: str | Path, trace_paths, base_dir: str | Path | None = 
                       else "mcp_registry")
             key = (d.normalized["binary"] if field_ == "shell_allowlist"
                    else f"{d.normalized['server']}/{d.normalized['tool']}")
-            if not clean:
-                group("untrusted", field_, example,
-                      f"session {obs.session}, after {tainted_by[obs.session]}"
-                      ).add(obs, example)
+            if untrusted:
+                group("untrusted", field_, example, untrusted).add(obs, example)
             elif field_ == "shell_allowlist" and argv_grammar.has_grammar(key):
                 new_bins.add(key)
                 group("add", field_, key, "has an argument grammar: it only reads, and "
@@ -573,15 +644,24 @@ def propose(policy_path: str | Path, trace_paths, base_dir: str | Path | None = 
             unlearned_allowed.append(describe(obs))
 
     notes = []
+    if unconfirmed and not any(obs.ran for obs in observations):
+        notes.append(f"these traces hold no PostToolUse records (recorded by 0.3.0, or "
+                     f"the hook is not registered for PostToolUse), so none of their "
+                     f"{unconfirmed} ask(s) is learned from. Register the same hook "
+                     f"command for PostToolUse and record again (docs/LEARNING.md).")
+    elif unconfirmed:
+        notes.append(f"{unconfirmed} ask(s) have no PostToolUse record: refused at the "
+                     f"prompt, failed or interrupted. They are not learned from.")
     if other_policy:
         notes.append(f"{other_policy} observation(s) were recorded under a different "
                      f"policy file; every decision here is recomputed against this one.")
     if unlearned_allowed:
         shown = "; ".join(unlearned_allowed[:3])
         notes.append(f"the proposed grants would also allow {len(unlearned_allowed)} "
-                     f"action(s) that were not learned from (refused at approval, or "
-                     f"after the session went for a protected path): {shown}. Check "
-                     f"that each grant is what you want.")
+                     f"action(s) that were not learned from (refused at approval, "
+                     f"asked and not confirmed as run, or after the session went for a "
+                     f"protected path): {shown}. Check that each grant is what you "
+                     f"want.")
     if drifted:
         notes.append(f"{drifted} observation(s) decide differently now than when they "
                      f"were recorded (the policy or the files changed).")
@@ -622,8 +702,7 @@ SECTIONS = [
     ("add", "Proposed grants"),
     ("unused", "Granted but never used in these traces"),
     ("decide", "Needs your decision (not proposed: the firewall cannot bound it)"),
-    ("untrusted", "Not learned from (the session had named or reached a protected "
-                  "path first)"),
+    ("untrusted", "Not learned from"),
     ("unchanged", "Unchanged: learning never relaxes these"),
 ]
 
@@ -688,8 +767,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="vt-agent-firewall-propose",
         description="Turn learning traces recorded by `vt-agent-firewall-hook --learn` "
-                    "into a proposed policy and a report. Nothing is applied: review "
-                    "the report and copy what you accept.")
+                    "into a proposed policy and a report. An ask counts only when the "
+                    "trace shows it ran (the hook registered for PostToolUse). Nothing "
+                    "is applied: review the report and copy what you accept.")
     parser.add_argument("traces", nargs="+", metavar="TRACE",
                         help="learning trace(s); several are merged")
     parser.add_argument("--policy", required=True,

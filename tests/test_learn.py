@@ -3,9 +3,10 @@
 The hook records observations with `--learn TRACE`; `vt-agent-firewall-propose`
 turns them into a proposed policy. These tests hold the promises the docs make:
 enforce mode answers exactly as without --learn, ask mode never relaxes more
-than the allowlist and the MCP registry, the proposal never grants anything
-risky and never relaxes a safety rule, and nothing is ever written over the
-policy.
+than the allowlist and the MCP registry, a PostToolUse event is recorded and
+never answered, an ask counts only when it ran, the proposal never grants
+anything risky and never relaxes a safety rule, and nothing is ever written over
+the policy.
 
 Run from the repo root:  python3 -m unittest discover -s tests -v
 """
@@ -14,9 +15,12 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import shutil
+import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 import unittest
 from pathlib import Path
@@ -39,19 +43,39 @@ class LearnTestBase(HookTestBase):
     def setUp(self):
         super().setUp()
         self.trace = self.tmp / "state" / "trace.jsonl"
+        self.calls = 0
 
     def learn(self, payload, mode="enforce", extra_args=(), policy=None):
         return self.run_hook(payload, policy=policy, extra_args=[
             "--learn", str(self.trace), "--learn-mode", mode, *extra_args])
 
-    def call(self, tool, tool_input, session="s1", mode="enforce", **overrides):
-        return self.learn(self.event(tool, tool_input, session_id=session, **overrides),
-                          mode=mode)
+    def call(self, tool, tool_input, session="s1", mode="enforce", ran=True, policy=None,
+             **overrides):
+        """One tool call as Claude Code makes it: PreToolUse, then PostToolUse if
+        the tool ran. `ran=False` is a human saying no at the prompt."""
+        self.calls += 1
+        overrides.setdefault("tool_use_id", f"toolu_{self.calls}")
+        event = self.event(tool, tool_input, session_id=session, **overrides)
+        result = self.learn(event, mode=mode, policy=policy)
+        if ran and result[0] == 0:
+            self.post(event, mode=mode, policy=policy)
+        return result
 
-    def observations(self):
+    def post(self, event, mode="enforce", policy=None, **overrides):
+        post = {**event, "hook_event_name": "PostToolUse",
+                "tool_response": {"output": "synthetic tool output"}, **overrides}
+        return self.learn(post, mode=mode, policy=policy)
+
+    def records_in_trace(self):
         if not self.trace.exists():
             return []
         return [json.loads(line) for line in self.trace.read_text().splitlines() if line]
+
+    def observations(self):
+        return [r for r in self.records_in_trace() if r["kind"] == "decision"]
+
+    def ran_records(self):
+        return [r for r in self.records_in_trace() if r["kind"] == "ran"]
 
     def propose(self, policy=None, **kwargs):
         return learn.propose(policy or self.policy_path, [self.trace],
@@ -92,7 +116,7 @@ class TestRecording(LearnTestBase):
                              (record["decision"], record["rule_id"], record["tool"],
                               record["normalized"], record["correlation_id"]))
             self.assertEqual((obs["v"], obs["mode"], obs["host"], obs["session_id"]),
-                             (1, "enforce", "claude-code", "s1"))
+                             (2, "enforce", "claude-code", "s1"))
             self.assertEqual(obs["sandbox_root"], str(self.ws.resolve()))
             self.assertEqual(len(obs["policy_sha256"]), 64)
             self.assertIn(str(self.trace.resolve()), obs["self_protected"])
@@ -140,6 +164,91 @@ class TestRecording(LearnTestBase):
         self.assertDenied(self.call("Bash", {"command": "ls normal"}), "fail-closed")
         [record] = self.records()
         self.assertIn("learning trace", record["reason"])
+
+    def test_post_tool_use_records_that_the_call_ran(self):
+        code, out, _ = self.call("Write", {"file_path": str(self.ws / "canary" / "x.txt"),
+                                           "content": "x"})
+        self.assertEqual((code, out["hookSpecificOutput"]["permissionDecision"]), (0, "ask"))
+        [obs], [ran] = self.observations(), self.ran_records()
+        self.assertEqual((ran["v"], ran["host"], ran["host_tool"], ran["session_id"],
+                          ran["correlation_id"]),
+                         (2, "claude-code", "Write", "s1", obs["correlation_id"]))
+        for key in ("sandbox_root", "policy_sha256", "self_protected", "mode"):
+            self.assertEqual(ran[key], obs[key], key)
+        # Ids only: neither the tool's input nor its output is kept.
+        self.assertNotIn("tool_input", ran)
+        self.assertNotIn("synthetic tool output", self.trace.read_text())
+        # Nothing was decided, so nothing new in the audit log.
+        self.assertEqual(len(self.records()), 1)
+
+    def test_post_tool_use_is_never_answered(self):
+        event = self.event("Write", {"file_path": str(self.ws / "canary" / "x.txt"),
+                                     "content": "x"}, session_id="s1")
+        self.assertEqual(self.post(event), (0, None, ""))
+        # Without --learn there is nothing to record: no trace, no audit record.
+        post = {**event, "hook_event_name": "PostToolUse", "tool_response": {}}
+        self.trace.unlink()
+        self.assertEqual(self.run_hook(post), (0, None, ""))
+        self.assertFalse(self.trace.exists())
+        self.assertEqual(self.records(), [])
+
+    def test_a_post_tool_use_failure_is_a_notice_never_a_denial(self):
+        """The tool already ran: exit 2 or JSON would reach the model. A record
+        that cannot be written is exit 1 (a hook error the user sees) and is
+        simply missing, so the ask is not learned from."""
+        event = self.event("Write", {"file_path": str(self.ws / "canary" / "x.txt"),
+                                     "content": "x"}, session_id="s1")
+        post = {**event, "hook_event_name": "PostToolUse", "tool_response": {}}
+
+        def slow(*_args, **_kwargs):
+            time.sleep(5)
+
+        cases = {
+            "no tool_use_id": (lambda: self.post(event, tool_use_id=None), "tool_use_id"),
+            "deadline": (lambda: self.run_hook(post, extra_args=[
+                "--learn", str(self.trace), "--deadline", "0.2"]), "no decision within"),
+            "invalid policy": (lambda: self.post(event, policy=self.tmp / "missing.json"),
+                               "cannot load policy"),
+        }
+        with mock.patch.object(learn.TraceWriter, "ran", side_effect=slow):
+            code, out, err = cases.pop("deadline")[0]()
+        self.assertEqual((code, out), (1, None))
+        self.assertIn("no decision within", err)
+        for name, (run, reason) in cases.items():
+            with self.subTest(case=name):
+                code, out, err = run()
+                self.assertEqual((code, out), (1, None), err)
+                self.assertIn(reason, err)
+        with mock.patch.object(learn.TraceWriter, "ran", side_effect=RuntimeError("boom")):
+            self.assertEqual(self.post(event)[:2], (1, None))
+        self.trace.unlink(missing_ok=True)
+        self.trace.mkdir(parents=True)        # a directory cannot be appended to
+        code, out, err = self.post(event)
+        self.assertEqual((code, out), (1, None))
+        self.assertIn("learning trace", err)
+        self.assertEqual(self.records(), [])
+
+    def test_post_tool_use_exit_codes_in_a_real_process(self):
+        event = self.event("Write", {"file_path": str(self.ws / "canary" / "x.txt"),
+                                     "content": "x"}, hook_event_name="PostToolUse",
+                           tool_response={"type": "create"})
+
+        def run():
+            return subprocess.run(
+                [sys.executable, "-m", "agent_firewall.hook", "--policy",
+                 str(self.policy_path), "--audit", str(self.audit_path), "--base-dir",
+                 str(self.tmp), "--learn", str(self.trace)],
+                input=json.dumps(event), capture_output=True, text=True, cwd=REPO,
+                env={**os.environ, "PYTHONPATH": str(REPO)}, timeout=30)
+        recorded = run()
+        self.assertEqual((recorded.returncode, recorded.stdout, recorded.stderr),
+                         (0, "", ""))
+        self.assertEqual(len(self.ran_records()), 1)
+        self.trace.unlink()
+        self.trace.mkdir()
+        failed = run()
+        self.assertEqual((failed.returncode, failed.stdout), (1, ""))
+        self.assertIn("learning trace", failed.stderr)
 
     def test_learn_mode_arguments(self):
         for extra in (["--learn-mode", "ask"],                       # no --learn
@@ -362,6 +471,68 @@ class TestProposal(LearnTestBase):
         self.assertEqual(self.keys(proposal, "unchanged"),
                          {("approval-denied", "approval-denied")})
 
+    def test_an_ask_counts_only_when_it_ran(self):
+        self.call("Write", {"file_path": str(self.ws / "reports" / "a.md"), "content": "x"})
+        self.call("Write", {"file_path": str(self.ws / "reports" / "b.md"), "content": "x"},
+                  ran=False)
+        self.call("Write", {"file_path": str(self.ws / "drafts" / "c.md"), "content": "x"},
+                  ran=False)
+        proposal = self.propose()
+        self.assertEqual(self.keys(proposal, "add"),
+                         {("writable_dirs", "demo_workspace/reports")})
+        [grant] = proposal.section("add")
+        self.assertEqual(grant.seen, 1)
+        refused = {g.key: g.why for g in proposal.section("untrusted")}
+        self.assertEqual(set(refused), {"Write demo_workspace/reports/b.md",
+                                        "Write demo_workspace/drafts/c.md"})
+        self.assertTrue(all("no PostToolUse record" in why for why in refused.values()))
+        unconfirmed, also_allowed = proposal.notes
+        self.assertIn("2 ask(s) have no PostToolUse record", unconfirmed)
+        self.assertIn("would also allow 1 action(s)", also_allowed)
+        self.assertIn("reports/b.md", also_allowed)
+
+    def test_a_refused_ask_mode_prompt_is_not_learned(self):
+        narrow = {**self.policy, "shell_allowlist": ["ls", "cat"]}
+        policy = self.tmp / "narrow.json"
+        policy.write_text(json.dumps(narrow))
+        self.call("Bash", {"command": "head -n 5 normal/notes.txt"}, mode="ask", ran=False,
+                  policy=policy)
+        proposal = self.propose(policy=policy)
+        self.assertEqual(proposal.section("add"), [])
+        [refused] = proposal.section("untrusted")
+        self.assertEqual(refused.key, "Bash head -n 5 normal/notes.txt")
+        self.call("Bash", {"command": "head -n 1 normal/notes.txt"}, mode="ask",
+                  policy=policy)
+        self.assertEqual(self.keys(self.propose(policy=policy), "add"),
+                         {("shell_allowlist", "head")})
+
+    def test_a_ran_record_confirms_only_its_own_call(self):
+        event = self.event("Write", {"file_path": str(self.ws / "reports" / "a.md"),
+                                     "content": "x"}, session_id="s1", tool_use_id="toolu_a")
+        self.learn(event)
+        self.post(event, session_id="s2")
+        self.post(event, tool_name="Edit")
+        self.post(event, tool_use_id="toolu_b")
+        self.assertEqual(self.propose().section("add"), [])
+        self.post(event)
+        self.assertEqual(self.keys(self.propose(), "add"),
+                         {("writable_dirs", "demo_workspace/reports")})
+
+    def test_a_trace_from_0_3_0_reads_but_its_asks_are_not_learned(self):
+        self.call("Write", {"file_path": str(self.ws / "reports" / "a.md"), "content": "x"})
+        self.call("Bash", {"command": "ls normal"})
+        # Version 1: the same decision records, no `kind`, no `ran` records.
+        old = [{**{k: v for k, v in obs.items() if k != "kind"}, "v": 1}
+               for obs in self.observations()]
+        self.trace.write_text("".join(json.dumps(obs) + "\n" for obs in old))
+        proposal = self.propose()
+        self.assertEqual(proposal.section("add"), [])
+        self.assertEqual(self.keys(proposal, "untrusted"),
+                         {("writable_dirs", "Write demo_workspace/reports/a.md")})
+        [note] = proposal.notes
+        self.assertIn("hold no PostToolUse records (recorded by 0.3.0", note)
+        self.assertEqual(proposal.before, {"allow": 1, "require_approval": 1})
+
     def test_unused_grants_are_reported_and_dropped_only_on_request(self):
         self.call("Bash", {"command": "ls normal"})
         kept = self.propose()
@@ -386,10 +557,13 @@ class TestProposal(LearnTestBase):
 
     def test_unusable_traces_are_refused(self):
         self.call("Bash", {"command": "ls normal"})
-        good = self.trace.read_text()
+        good = self.trace.read_text().splitlines()[0]   # the decision record
         cases = {
             "not json": "{nope\n",
-            "other version": json.dumps({**json.loads(good), "v": 2}) + "\n",
+            "other version": json.dumps({**json.loads(good), "v": 3}) + "\n",
+            "unknown kind": json.dumps({**json.loads(good), "kind": "x"}) + "\n",
+            "ran without ids": json.dumps({**json.loads(good), "kind": "ran",
+                                           "correlation_id": None}) + "\n",
             "missing tool": json.dumps({**json.loads(good), "tool": None}) + "\n",
             "other sandbox": json.dumps({**json.loads(good),
                                          "sandbox_root": "/elsewhere"}) + "\n",
@@ -500,6 +674,9 @@ class TestCli(LearnTestBase):
         text = out.getvalue()
         self.assertRegex(text, r"\+ writable_dirs +demo_workspace/reports")
         self.assertIn("after Read demo_workspace/.env", text)
+        # The write you refused is not learned, though asked like the reports/ ones.
+        self.assertRegex(text, r"Write demo_workspace/scratch/plan.md  \(1 time\)\n +asked, "
+                               r"and no PostToolUse record")
         proposed = json.loads((self.tmp / "demo" / "proposed-policy.json").read_text())
         default = json.loads((REPO / "policies/default.json").read_text())
         self.assertEqual(proposed["shell_allowlist"], default["shell_allowlist"])

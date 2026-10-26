@@ -282,7 +282,8 @@ class TestMalformedInput(HookTestBase):
             "relative cwd": self.event("Bash", {"command": "ls"}, cwd="demo_workspace"),
             "no tool_name": self.event(None, {"command": "ls"}),
             "wrong event": self.event("Bash", {"command": "ls"},
-                                      hook_event_name="PostToolUse"),
+                                      hook_event_name="PostToolUseFailure"),
+            "no event name": self.event("Bash", {"command": "ls"}, hook_event_name=None),
             "write without path": self.event("Write", {"content": "x"}),
             "bad mcp name": self.event("mcp__onlyserver", {}),
         }
@@ -484,6 +485,24 @@ class TestShippedExamples(unittest.TestCase):
         self.assertEqual(handler["type"], "command")
         self.assertIn("vt-agent-firewall-hook", handler["command"])
         self.assertGreater(handler["timeout"], hook.DEFAULT_DEADLINE_SEC)
+
+    def test_claude_learning_example_registers_post_tool_use(self):
+        """Learning needs the same command on PostToolUse, or every ask in the
+        trace stays unconfirmed and is not learned from."""
+        settings = json.loads((REPO / "examples/hooks/claude-code-settings-learn.json")
+                              .read_text())
+        base = json.loads((REPO / "examples/hooks/claude-code-settings.json").read_text())
+        [pre] = settings["hooks"]["PreToolUse"]
+        [post] = settings["hooks"]["PostToolUse"]
+        self.assertEqual(pre["matcher"], base["hooks"]["PreToolUse"][0]["matcher"])
+        self.assertEqual(post["matcher"], pre["matcher"])
+        [pre_handler], [post_handler] = pre["hooks"], post["hooks"]
+        self.assertEqual(pre_handler["command"], post_handler["command"])
+        self.assertIn(" --learn ", pre_handler["command"])
+        self.assertTrue(pre_handler["command"].startswith(
+            base["hooks"]["PreToolUse"][0]["hooks"][0]["command"]))
+        for handler in (pre_handler, post_handler):
+            self.assertGreater(handler["timeout"], hook.DEFAULT_DEADLINE_SEC)
 
     def test_codex_config_example_matches_mapped_tools(self):
         import tomllib
