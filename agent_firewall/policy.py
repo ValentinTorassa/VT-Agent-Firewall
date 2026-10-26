@@ -15,7 +15,13 @@ reaches one, blocked or not, taints the session.
 Rule precedence (per tool, most specific first):
   fs-protected > fs-sandbox > tool-specific checks > allow/default-deny
 Shell order: sh-syntax (via_shell only) > sh-allowlist > sh-paths > sh-args >
-sh-recursive.
+sh-recursive. A binary off the allowlist passes sh-allowlist only through an
+exact argv on `shell_exact` (allow, `sh-exact`) or its name on `shell_ask`
+(require_approval, `sh-ask`); every later check still applies, and a tainted
+session gets neither.
+Network: deny-all (`net-deny-all`) unless `network.mode` is `allowlist`, where
+GET/HEAD to a listed origin is allowed (`net-ok`) and the rest is refused
+(`net-allowlist`); see network.py. A tainted session gets no network.
 Fail-closed: malformed params, unknown tools, options outside a grammar, or
 no matching allow rule all produce BLOCK.
 """
@@ -28,6 +34,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from . import argv as argv_grammar
+from . import network
 from . import shell_syntax
 from .config import Config
 from .models import ActionRequest, Decision, PolicyDecision
@@ -163,10 +170,19 @@ class PolicyEngine:
         # Taint on potential access: any token (or --opt=value) that names a
         # protected path taints the session, whatever the decision below.
         self._taint_if_named(args, cwd, session)
+        # The allowlist grants a binary; shell_exact one argv of it, as
+        # written; shell_ask turns the refusal into a human's call. The last
+        # two lift sh-allowlist and nothing else: the checks below still run.
+        grant = "sh-ok"
         if binary not in self.cfg.shell_allowlist:
-            return self._decide(req, Decision.BLOCK, "sh-allowlist",
-                                f"binary not allowlisted: {binary}", "high",
-                                normalized)
+            if self.cfg.exact_command(argv, cwd) is not None:
+                grant = "sh-exact"
+            elif binary in self.cfg.shell_ask:
+                grant = "sh-ask"
+            else:
+                return self._decide(req, Decision.BLOCK, "sh-allowlist",
+                                    f"binary not allowlisted: {binary}", "high",
+                                    normalized)
         parsed = argv_grammar.parse(binary, args)
         # Every file the grammar says the command may open is checked against
         # the canonical filesystem view, option values included (--file=.env).
@@ -182,6 +198,20 @@ class PolicyEngine:
                 return self._decide(req, Decision.BLOCK, "sh-paths",
                                     f"argv escapes sandbox: {resolved}", "high",
                                     normalized)
+        if grant != "sh-ok" and not argv_grammar.has_grammar(binary):
+            # Without a grammar nothing says which tokens are files, and the
+            # fallback misses `@file` (curl -d @.env), `--opt=@file` and an
+            # attached short-option value (-d@.env). A grant that lets an
+            # unbounded binary run, or be asked about, looks in those too.
+            for token in args:
+                for spelled in self._file_spellings(token):
+                    resolved = self._resolve_path(spelled, cwd)
+                    if self.cfg.is_protected(resolved):
+                        session.tainted = True
+                        return self._decide(req, Decision.BLOCK, "sh-paths",
+                                            f"argv names protected path {resolved} "
+                                            f"({token!r})", "high", normalized,
+                                            matched=["sh-paths", "fs-protected"])
         forbidden = sorted(self.cfg.shell_forbidden_args.get(binary, set())
                            .intersection(args))
         if parsed.errors or forbidden:
@@ -208,9 +238,26 @@ class PolicyEngine:
                       f"tree under {root} is too large to verify")
             return self._decide(req, Decision.BLOCK, "sh-recursive", reason,
                                 "high", normalized)
-        return self._decide(req, Decision.ALLOW, "sh-ok",
-                            f"allowlisted binary, paths in sandbox: {binary}",
-                            "low", normalized)
+        if grant == "sh-ok":
+            return self._decide(req, Decision.ALLOW, "sh-ok",
+                                f"allowlisted binary, paths in sandbox: {binary}",
+                                "low", normalized)
+        command = shlex.join(argv)
+        if session.tainted:
+            # Neither grant bounds what the program does, so a session that went
+            # for a protected path runs neither, like the network and api.call.
+            return self._decide(req, Decision.BLOCK, "taint-session",
+                                f"{command}: session tainted by protected-path "
+                                f"access; no {grant} command runs", "high",
+                                normalized, matched=[grant, "taint-session"])
+        if grant == "sh-exact":
+            return self._decide(req, Decision.ALLOW, "sh-exact",
+                                f"exact command on shell_exact: {command}", "medium",
+                                normalized)
+        return self._decide(req, Decision.REQUIRE_APPROVAL, "sh-ask",
+                            f"{command}: {binary} is on shell_ask (no argument "
+                            f"grammar: the firewall cannot bound what it runs); "
+                            f"approve only this exact command", "high", normalized)
 
     def _shell_syntax(self, req, session) -> PolicyDecision | None:
         line = req.params["command_line"]
@@ -273,6 +320,15 @@ class PolicyEngine:
                     stack.append((real, depth + 1))
         return None
 
+    @staticmethod
+    def _file_spellings(token: str) -> set[str]:
+        """Every way `token` may name a file for a binary without a grammar."""
+        found = {token, token.partition("=")[2]}
+        if token.startswith("-") and not token.startswith("--"):
+            found.add(token[2:])
+        found |= {f[1:] for f in found if f.startswith("@")}
+        return {f for f in found if f and "\0" not in f}
+
     def _taint_if_named(self, tokens: list[str], cwd: Path, session) -> None:
         for token in tokens:
             for spelled in (token, token.partition("=")[2]):
@@ -293,13 +349,32 @@ class PolicyEngine:
         normalized = {"url": url, "scheme": parsed.scheme,
                       "host": parsed.hostname, "port": parsed.port,
                       "method": req.params.get("method", "GET")}
-        matched = ["net-deny-all"]
-        reason = "network is deny-total by policy"
+        if self.cfg.network_mode != "allowlist":
+            matched = ["net-deny-all"]
+            reason = "network is deny-total by policy"
+            if session.tainted:
+                matched.append("taint-session")
+                reason += "; session tainted by protected-path access"
+            return self._decide(req, Decision.BLOCK, "net-deny-all", reason, "high",
+                                normalized, matched=matched)
+        entry, why = network.match(self.cfg.network_allow, url,
+                                   req.params.get("method", "GET"),
+                                   req.params.get("body"))
+        if entry is None:
+            matched = ["net-allowlist"]
+            reason = f"network allowlist: {why}"
+            if session.tainted:
+                matched.append("taint-session")
+                reason += "; session tainted by protected-path access"
+            return self._decide(req, Decision.BLOCK, "net-allowlist", reason, "high",
+                                normalized, matched=matched)
         if session.tainted:
-            matched.append("taint-session")
-            reason += "; session tainted by protected-path access"
-        return self._decide(req, Decision.BLOCK, "net-deny-all", reason, "high",
-                            normalized, matched=matched)
+            return self._decide(req, Decision.BLOCK, "taint-session",
+                                f"{entry.text} is on network.allow, but the session "
+                                f"is tainted by protected-path access; no network",
+                                "high", normalized, matched=["net-ok", "taint-session"])
+        return self._decide(req, Decision.ALLOW, "net-ok",
+                            f"on network.allow: {entry.text}", "medium", normalized)
 
     # -- mcp.call ---------------------------------------------------------------
 

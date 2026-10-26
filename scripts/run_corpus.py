@@ -23,6 +23,18 @@ class DenyApproval:
         return False
 
 
+def case_policy(case: dict) -> dict:
+    """policies/default.json with the case's changes: extra protected paths
+    (`protected_paths_add`) and top-level keys replaced (`set`), so a case can
+    test a rule the default policy does not use (shell_ask, shell_exact, a
+    network allowlist)."""
+    policy = json.loads((ROOT / "policies/default.json").read_text(encoding="utf-8"))
+    changes = case.get("policy", {})
+    policy["protected_paths"] += changes.get("protected_paths_add", [])
+    policy.update(changes.get("set", {}))
+    return policy
+
+
 def run_corpus() -> list[str]:
     data = json.loads((ROOT / "corpus/attacks.json").read_text(encoding="utf-8"))
     if data["version"] != 1:
@@ -36,9 +48,8 @@ def run_corpus() -> list[str]:
             # extra protected paths, so a case can build the tree it attacks.
             for link, target in case.get("setup", {}).get("symlinks", []):
                 (temp / "demo_workspace" / link).symlink_to(target)
-            policy = json.loads((ROOT / "policies/default.json").read_text(encoding="utf-8"))
-            policy["protected_paths"] += case.get("policy", {}).get("protected_paths_add", [])
-            (temp / "policy.json").write_text(json.dumps(policy), encoding="utf-8")
+            (temp / "policy.json").write_text(json.dumps(case_policy(case)),
+                                              encoding="utf-8")
             gateway = Gateway(temp / "policy.json", temp / "audit.jsonl",
                               approver=DenyApproval(), base_dir=temp)
             try:

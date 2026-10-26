@@ -1,13 +1,16 @@
 """Executors: the only code that touches the real world.
 
 Input is ALWAYS the normalized dict from a PolicyDecision, never the
-spelled request params. shell=False everywhere; network executor exists
-only for the --no-firewall contrast mode (policy never allows it).
+spelled request params. shell=False everywhere. The network executor runs
+only what `network.allow` admits (and the --no-firewall contrast mode); it
+never follows a redirect, so an allowed origin cannot send the request on to
+one the policy never saw.
 """
 
 from __future__ import annotations
 
 import subprocess
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -61,8 +64,15 @@ class Executor:
         data = body.encode() if isinstance(body, str) else None
         req = urllib.request.Request(n["url"], data=data,
                                      method=n.get("method", "GET"))
-        with urllib.request.urlopen(req, timeout=NET_TIMEOUT_SEC) as resp:
-            return f"HTTP {resp.status}"
+        opener = urllib.request.build_opener(_NoRedirect)
+        try:
+            with opener.open(req, timeout=NET_TIMEOUT_SEC) as resp:
+                return f"HTTP {resp.status}"
+        except urllib.error.HTTPError as e:
+            if 300 <= e.code < 400:
+                return (f"HTTP {e.code}: redirect to {e.headers.get('Location')!r} "
+                        f"not followed")
+            raise
 
     def _mcp_call(self, n: dict):
         backend = self.mcp_backends.get(n["server"])
@@ -98,3 +108,10 @@ class Executor:
             audience=n["audience"], scopes={n["scope"]})
         result = api.call(token.value, n["operation"], n["arguments"])
         return {"result": result, "token": token.claims()}
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A redirect is a new request the policy has not decided: not followed."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None

@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from test_hook import HookTestBase  # noqa: E402
 
 from agent_firewall import ActionRequest, Decision, Gateway, hook, learn  # noqa: E402
-from scripts import run_learning_demo  # noqa: E402
+from scripts import run_corpus, run_learning_demo  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 SAFETY_KEYS = ("sandbox_root", "protected_paths", "shell_forbidden_args", "network",
@@ -589,9 +589,7 @@ class TestCorpus(unittest.TestCase):
                                 symlinks=True)
                 for link, target in case.get("setup", {}).get("symlinks", []):
                     (temp / "demo_workspace" / link).symlink_to(target)
-                policy = json.loads((REPO / "policies/default.json").read_text())
-                policy["protected_paths"] += case.get("policy", {}).get(
-                    "protected_paths_add", [])
+                policy = run_corpus.case_policy(case)
                 policy_path = temp / "policy.json"
                 policy_path.write_text(json.dumps(policy))
                 gateway = Gateway(policy_path, temp / "audit.jsonl", base_dir=temp)
