@@ -139,6 +139,10 @@ stdio. El cliente lanza el proxy como si fuera el servidor; el proxy lanza el re
   `tools/call` mandado como notificación se descarta, así que nada llega al servidor
   por fuera de la política;
 - `--pin RUTA=SHA256` se niega a arrancar un servidor cuyo código cambió;
+- `--learn TRAZA` registra una observación por cada `tools/call` y `resources/read`
+  para `vt-agent-firewall-propose` ([modo aprendizaje](#modo-aprendizaje), sólo
+  enforce): las respuestas no cambian, la traza queda protegida y una traza que no
+  se puede escribir rechaza todas las llamadas;
 - la aprobación nunca lee stdin (es el canal MCP): se deniega salvo que esté
   `--tty-approval` y haya una terminal disponible.
 
@@ -240,6 +244,9 @@ python3 scripts/run_learning_demo.py   # el circuito completo sobre demo_workspa
   de red, binarios que escriben, tools MCP y archivos en la raíz quedan listados
   para que decidas vos, con cuántas veces se vieron. Los paths protegidos, el
   sandbox, la red y los argumentos prohibidos nunca se relajan.
+- **El proxy MCP también registra:** `vt-agent-firewall-mcp --learn TRAZA` escribe
+  una observación por cada `tools/call` y `resources/read`, sólo en modo enforce,
+  así que también se puede proponer una política para un setup que usa sólo MCP.
 - **No todo es evidencia.** Lo que hizo una sesión después de nombrar o alcanzar un
   path protegido, lo que se rechazó en la aprobación y un ask sin registro de
   `PostToolUse` (dijiste que no) no se aprenden. Antes de imprimir, la propuesta se

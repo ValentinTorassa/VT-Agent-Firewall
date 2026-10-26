@@ -122,6 +122,10 @@ client launches the proxy as if it were the server; the proxy launches the real 
   `tools/call` sent as a notification is dropped, so nothing reaches the server
   around the policy;
 - `--pin PATH=SHA256` refuses to start a server whose code changed;
+- `--learn TRACE` records one observation per `tools/call` and `resources/read`
+  for `vt-agent-firewall-propose` ([learning mode](#learning-mode), enforce
+  only): the answers do not change, the trace is protected, and a trace that
+  cannot be written refuses every call;
 - approval never reads stdin (it is the MCP channel): it is denied unless
   `--tty-approval` is set and a terminal is available.
 
@@ -222,6 +226,9 @@ python3 scripts/run_learning_demo.py   # the whole loop on demo_workspace
   that write, MCP tools and files in the root are listed for your decision, with
   how often they were seen. Protected paths, the sandbox, network and forbidden
   arguments are never relaxed.
+- **The MCP proxy records too:** `vt-agent-firewall-mcp --learn TRACE` writes one
+  observation per `tools/call` and `resources/read`, in enforce mode only, so an
+  MCP-only setup can be proposed from as well.
 - **Not everything is evidence.** What a session did after it named or reached a
   protected path, what was refused at approval, and an ask with no `PostToolUse`
   record (you said no) are not learned from. Before printing, the proposal is
