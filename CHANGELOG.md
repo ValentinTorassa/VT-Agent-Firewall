@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+- **Learning mode counts an ask only after your yes** (#4). Registered for
+  `PostToolUse` as well, `vt-agent-firewall-hook --learn` appends a `ran` record
+  (session, `tool_use_id`, tool name; never the tool's output) for each call the
+  host ran. `vt-agent-firewall-propose` treats an ask (`fs-write-scope`, or
+  `learn-ask` in ask mode) as evidence only when a `ran` record matches it; one
+  you refused at the prompt moves to "Not learned from", and the report says how
+  many asks were unconfirmed. Denials are unaffected.
+- The `PostToolUse` call never changes the agent's outcome: no JSON, never exit
+  2, nothing audited. A `ran` record that cannot be written is missing, so the
+  ask is not learned from (the evidence fails closed); the hook exits 1, a hook
+  error shown to the user only. Without `--learn` the event is a no-op.
+- Trace format version 2 (`kind`: `decision` or `ran`). Version 1 traces from
+  0.3.0 still read, but have no `ran` records, so none of their asks is learned
+  from and the report says so: record again with `PostToolUse` registered.
+- `examples/hooks/claude-code-settings-learn.json`: the settings for learning,
+  with the same command on `PreToolUse` and `PostToolUse`.
+- `scripts/run_learning_demo.py` sends `PostToolUse` after each call that runs
+  and refuses two asks; `docs/LEARNING.md` documents the event, the trace
+  records and the limits.
+
 ## 0.3.0 — 2026-10-23
 
 Learning mode: observe a real session, then propose a policy instead of writing
