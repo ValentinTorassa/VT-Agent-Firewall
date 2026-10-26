@@ -354,7 +354,7 @@ class TestProposal(LearnTestBase):
         self.assertEqual(proposal.before, {"allow": 1, "require_approval": 4})
         self.assertEqual(proposal.after, {"allow": 3, "require_approval": 2})
 
-    def test_risky_binaries_are_never_proposed(self):
+    def test_risky_binaries_are_never_allowlisted_only_asked_about(self):
         commands = ["python3 tools/check.py", "node x.js", "sh -c ls", "bash x.sh",
                     "curl https://example.com", "wget https://example.com",
                     "rm normal/notes.txt", "mv normal/notes.txt normal/n.txt",
@@ -365,14 +365,21 @@ class TestProposal(LearnTestBase):
             self.call("Bash", {"command": command})
         proposal = self.propose()
         self.assertEqual(proposal.policy["shell_allowlist"], self.policy["shell_allowlist"])
-        self.assertEqual(proposal.section("add"), [])
-        decide = {g.key: g.why for g in proposal.section("decide")}
-        self.assertEqual(set(decide), {c.split()[0] for c in commands})
-        self.assertIn("runs code", decide["python3"])
-        self.assertIn("network", decide["curl"])
-        self.assertIn("writes or deletes files", decide["rm"])
-        self.assertIn("reads secrets", decide["printenv"])
-        self.assertTrue(all("no argument grammar" in why for why in decide.values()))
+        binaries = {c.split()[0] for c in commands}
+        self.assertEqual(proposal.policy["shell_ask"], sorted(binaries))
+        ask = {g.key: g.why for g in proposal.section("add")}
+        self.assertEqual(set(ask), binaries)
+        self.assertEqual(self.keys(proposal, "add"), {("shell_ask", b) for b in binaries})
+        self.assertIn("runs code", ask["python3"])
+        self.assertIn("network", ask["curl"])
+        self.assertIn("writes or deletes files", ask["rm"])
+        self.assertIn("reads secrets", ask["printenv"])
+        self.assertTrue(all("never allowed" in why for why in ask.values()))
+        # Allowing any of them without asking is a human's decision, one exact
+        # command at a time.
+        exact = {g.key for g in proposal.section("decide")}
+        self.assertEqual(exact, {json.dumps(c.split()) for c in commands})
+        self.assertNotIn("shell_exact", proposal.policy)
 
     def test_a_binary_with_a_grammar_is_proposed_when_nothing_else_refuses_it(self):
         narrow = {**self.policy, "shell_allowlist": ["ls", "cat"]}
@@ -550,9 +557,11 @@ class TestProposal(LearnTestBase):
         self.call("Write", {"file_path": str(self.ws / "reports" / "a.md"), "content": "x"},
                   mode="ask")
         proposal = self.propose()
-        self.assertEqual(self.keys(proposal, "decide"), {("shell_allowlist", "python3")})
+        self.assertEqual(self.keys(proposal, "decide"),
+                         {("shell_exact", '["python3", "x.py"]')})
         self.assertEqual(self.keys(proposal, "add"),
-                         {("writable_dirs", "demo_workspace/reports")})
+                         {("writable_dirs", "demo_workspace/reports"),
+                          ("shell_ask", "python3")})
         self.assertEqual(proposal.notes, [])
 
     def test_unusable_traces_are_refused(self):
@@ -630,7 +639,8 @@ class TestCli(LearnTestBase):
         self.assertIn("Nothing has been applied", report)
         self.assertRegex(report, r"\+ writable_dirs +demo_workspace/reports +1 time, "
                                  r"1 session")
-        self.assertRegex(report, r"shell_allowlist +python3 +1 time")
+        self.assertRegex(report, r"\+ shell_ask +python3 +1 time")
+        self.assertRegex(report, r'shell_exact +\["python3", "x.py"\] +1 time')
         self.assertIn("Replayed against the proposal: allow 0 -> 1", report)
 
     def test_never_writes_over_the_policy(self):
