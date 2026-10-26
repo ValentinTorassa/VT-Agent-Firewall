@@ -16,6 +16,10 @@ Ordering invariants:
   runs its own tools (the Claude Code / Codex hook). An allowed action gets a
   durable `delegated` record before the host may run it; the gateway never
   sees the result, so there is no `executed` record to pair it with.
+- `handle_with_result(observe=...)` hands each decision's record to an
+  observer (learning mode's trace, in the MCP proxy) before anything executes.
+  If the observer fails, an allowed action is not dispatched: its intent is
+  resolved as a `fail-closed` block.
 """
 
 from __future__ import annotations
@@ -67,14 +71,20 @@ class Gateway:
         """Decide, execute if allowed, audit. Returns the audit record."""
         return self.handle_with_result(req)[0]
 
-    def handle_with_result(self, req: ActionRequest) -> tuple[dict, object]:
+    def handle_with_result(self, req: ActionRequest, observe=None) -> tuple[dict, object]:
         """Same as `handle`, plus the full executor result (None unless executed).
 
         The audit record only keeps a 200-character preview; callers that relay
         the result (the MCP proxy) need all of it.
+
+        `observe`, when given, is called once with the decision's audit record
+        (the block, or the intent of an allowed action) before anything
+        executes. If it raises, an allowed action is not executed and its
+        intent is resolved as a `fail-closed` block; a refusal stays a refusal.
         """
         if self._broken:
-            return self._record(self._fail_closed(req), outcome="not_executed"), None
+            return self._seen(self._record(self._fail_closed(req), outcome="not_executed"),
+                              observe), None
 
         decision = self.policy.evaluate(req, self.session)
 
@@ -87,15 +97,27 @@ class Gateway:
 
         if decision.decision == Decision.BLOCK:
             # Audit-first: the attempt is recorded before we return.
-            return self._record(decision, outcome="not_executed"), None
+            return self._seen(self._record(decision, outcome="not_executed"), observe), None
 
         action_id = uuid.uuid4().hex
         try:
             # fsync the intent before dispatch. A crash thereafter leaves an
             # explicit unresolved action rather than an invisible side effect.
-            self._record(decision, outcome="intent", action_id=action_id, strict=True)
+            intent = self._record(decision, outcome="intent", action_id=action_id,
+                                  strict=True)
         except AuditUnavailable:
-            return self._unrecorded_block(decision, action_id), None
+            return self._seen(self._unrecorded_block(decision, action_id), observe), None
+        if observe is not None:
+            try:
+                observe(intent)
+            except Exception as e:
+                refused = PolicyDecision(
+                    request=req, decision=Decision.BLOCK, rule_id="fail-closed",
+                    reason=f"{e}; refusing to execute", risk="high",
+                    rules_matched=[*decision.rules_matched, "fail-closed"],
+                    normalized=decision.normalized)
+                return self._record(refused, outcome="not_executed",
+                                    action_id=action_id), None
 
         try:
             result = self.executor.execute(decision.request.tool,
@@ -150,6 +172,17 @@ class Gateway:
                                   rule_id=rule_id, reason=reason, risk="high",
                                   rules_matched=[rule_id], normalized={})
         return self._record(decision, outcome="not_executed", **extra)
+
+    @staticmethod
+    def _seen(record: dict, observe) -> dict:
+        """Hand a refusal to the observer. It is refused either way, so an
+        observer that fails changes nothing here."""
+        if observe is not None:
+            try:
+                observe(record)
+            except Exception:
+                pass
+        return record
 
     @staticmethod
     def _fail_closed(req: ActionRequest) -> PolicyDecision:
