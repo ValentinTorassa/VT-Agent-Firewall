@@ -216,12 +216,14 @@ timeout o no arranca; y sólo pasan comandos de shell simples.
 
 Escribir una política de mínimo privilegio desde cero es difícil, y por eso se
 termina en allow-all. Con `--learn TRACE` el hook además registra cada pedido y lo
-que decidió la política; `vt-agent-firewall-propose` reproduce la traza contra la
-política y escribe una política propuesta con un reporte. No se aplica nada: el
-comando nunca escribe sobre la política.
+que decidió la política, y, registrado también para `PostToolUse`, qué llamadas se
+ejecutaron; `vt-agent-firewall-propose` reproduce la traza contra la política y
+escribe una política propuesta con un reporte. No se aplica nada: el comando nunca
+escribe sobre la política.
 
 ```bash
-# en el comando del hook: ... --learn ~/.local/state/vt-agent-firewall/learn.jsonl
+# en el comando del hook, para PreToolUse y PostToolUse (examples/hooks/claude-code-settings-learn.json):
+#   ... --learn ~/.local/state/vt-agent-firewall/learn.jsonl
 vt-agent-firewall-propose --policy .claude/agent-firewall.json --base-dir . \
   --out proposed.json ~/.local/state/vt-agent-firewall/learn.jsonl
 python3 scripts/run_learning_demo.py   # el circuito completo sobre demo_workspace
@@ -239,9 +241,10 @@ python3 scripts/run_learning_demo.py   # el circuito completo sobre demo_workspa
   para que decidas vos, con cuántas veces se vieron. Los paths protegidos, el
   sandbox, la red y los argumentos prohibidos nunca se relajan.
 - **No todo es evidencia.** Lo que hizo una sesión después de nombrar o alcanzar un
-  path protegido, y lo que se rechazó en la aprobación, no se aprende. Antes de
-  imprimir, la propuesta se reproduce contra cada observación y se rechaza si
-  cualquier otra cosa quedó más permisiva.
+  path protegido, lo que se rechazó en la aprobación y un ask sin registro de
+  `PostToolUse` (dijiste que no) no se aprenden. Antes de imprimir, la propuesta se
+  reproduce contra cada observación y se rechaza si cualquier otra cosa quedó más
+  permisiva.
 
 [docs/LEARNING.md](docs/LEARNING.md) (en inglés) tiene el recorrido con
 `demo_workspace`, el formato de la traza y los límites.
@@ -258,7 +261,8 @@ policies/         default.json: sandbox, paths protegidos, allowlists, registry 
 scripts/          run_demo.py, mock_receiver.py, run_corpus.py, score_model_following.py,
                   run_learning_demo.py
 examples/         fs_mcp_server.py (un servidor MCP ingenuo para tests y demos);
-                  hooks/ (settings de Claude Code, config de Codex, una política de proyecto)
+                  hooks/ (settings de Claude Code, también con aprendizaje, config de
+                  Codex, una política de proyecto)
 tests/            tests de aceptación AC1–AC12, test_delegation.py (los cuatro modos
                   de falla de OAuth), test_mcp_proxy.py (un servidor MCP real por
                   stdio), test_bypasses.py (cada bypass encontrado en la revisión,
@@ -292,8 +296,9 @@ Son límites deliberados de la v0, no ocultos:
   `PATH` deciden qué corre de verdad bajo un nombre permitido. Ver
   [docs/AGENT_HOOKS.md](docs/AGENT_HOOKS.md#limits).
 - **El modo aprendizaje propone; no juzga intenciones.** Una sesión que nunca tocó
-  un path protegido parece trabajo aunque la maneje una inyección, y el hook no ve
-  tu respuesta a un prompt. Revisá cada permiso y sus ejemplos. Ver
+  un path protegido parece trabajo aunque la maneje una inyección, y un ask que
+  aprobaste cuenta como cualquier otra evidencia. Revisá cada permiso y sus
+  ejemplos. Ver
   [docs/LEARNING.md](docs/LEARNING.md#limits).
 - **Las gramáticas de shell siguen la userland GNU** (coreutils, grep, findutils). Un
   binario agregado sin gramática usa un fallback conservador. El resto está en el

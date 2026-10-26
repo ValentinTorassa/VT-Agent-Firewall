@@ -198,12 +198,14 @@ commands pass.
 
 A least-privilege policy is hard to write from scratch, so people fall back to
 allow-all. With `--learn TRACE` the hook also records every request and what the
-policy decided; `vt-agent-firewall-propose` replays the trace against the policy
-and writes a proposed policy with a report. Nothing is applied: the command never
-writes over the policy.
+policy decided, and, registered for `PostToolUse` too, which calls ran;
+`vt-agent-firewall-propose` replays the trace against the policy and writes a
+proposed policy with a report. Nothing is applied: the command never writes over
+the policy.
 
 ```bash
-# in the hook command: ... --learn ~/.local/state/vt-agent-firewall/learn.jsonl
+# in the hook command, for PreToolUse and PostToolUse (examples/hooks/claude-code-settings-learn.json):
+#   ... --learn ~/.local/state/vt-agent-firewall/learn.jsonl
 vt-agent-firewall-propose --policy .claude/agent-firewall.json --base-dir . \
   --out proposed.json ~/.local/state/vt-agent-firewall/learn.jsonl
 python3 scripts/run_learning_demo.py   # the whole loop on demo_workspace
@@ -221,9 +223,9 @@ python3 scripts/run_learning_demo.py   # the whole loop on demo_workspace
   how often they were seen. Protected paths, the sandbox, network and forbidden
   arguments are never relaxed.
 - **Not everything is evidence.** What a session did after it named or reached a
-  protected path, and what was refused at approval, is not learned from. Before
-  printing, the proposal is replayed against every observation and refused if
-  anything else got looser.
+  protected path, what was refused at approval, and an ask with no `PostToolUse`
+  record (you said no) are not learned from. Before printing, the proposal is
+  replayed against every observation and refused if anything else got looser.
 
 [docs/LEARNING.md](docs/LEARNING.md) has the walkthrough with `demo_workspace`,
 the trace format and the limits.
@@ -240,7 +242,8 @@ policies/         default.json: sandbox, protected paths, allowlists, MCP regist
 scripts/          run_demo.py, mock_receiver.py, run_corpus.py, score_model_following.py,
                   run_learning_demo.py
 examples/         fs_mcp_server.py (a naive MCP server for tests and demos);
-                  hooks/ (Claude Code settings, Codex config, a project policy)
+                  hooks/ (Claude Code settings, with learning too, Codex config,
+                  a project policy)
 tests/            acceptance tests AC1–AC12, test_delegation.py (the four OAuth failure
                   modes), test_mcp_proxy.py (a real MCP server over stdio),
                   test_bypasses.py (every bypass found in review, as a regression),
@@ -269,8 +272,9 @@ These are deliberate v0 boundaries, not hidden ones:
   tool anyway when the hook times out or cannot start, and aliases or `PATH` decide
   what an allowlisted name really runs. See [docs/AGENT_HOOKS.md](docs/AGENT_HOOKS.md#limits).
 - **Learning mode proposes; it does not judge intent.** A session that never
-  touched a protected path looks like work even if an injection drove it, and the
-  hook does not see your answer to a prompt. Review each grant and its examples.
+  touched a protected path looks like work even if an injection drove it, and an
+  ask you approved counts like any other evidence. Review each grant and its
+  examples.
   See [docs/LEARNING.md](docs/LEARNING.md#limits).
 - **The shell grammars follow GNU userland** (coreutils, grep, findutils). Binaries
   added without a grammar get a conservative fallback. See the

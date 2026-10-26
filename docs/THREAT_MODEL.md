@@ -131,9 +131,9 @@ attack works, and the same attack stopped by the gateway and the broker.
 - Learning mode records what an agent attempted, including what an injection made
   it attempt. The proposal never relaxes a safety rule, grants only writable
   directories and binaries with a grammar, and does not learn from a session after
-  it went for a protected path or from a refusal at approval; anything else a
-  hijacked session did looks like work, so a human reviews every grant
-  ([LEARNING.md](LEARNING.md#limits)). `--learn-mode ask` lets a human approve
+  it went for a protected path, from a refusal at approval, or from an ask that no
+  `PostToolUse` record shows ran; anything else a hijacked session did looks like
+  work, so a human reviews every grant ([LEARNING.md](LEARNING.md#limits)). `--learn-mode ask` lets a human approve
   calls the allowlist or the MCP registry would refuse.
 - The agent hook is a policy check, not isolation: an allowed binary runs with the
   host's full rights. Whoever controls the host's settings can remove or disable

@@ -55,7 +55,11 @@ Code's prompt for that call; deny and ask rules in your settings still apply.
 
 `--learn TRACE` also records every decision for `vt-agent-firewall-propose`,
 which proposes a policy from what the agent attempted; the policy is still
-enforced unless you choose `--learn-mode ask`. See [LEARNING.md](LEARNING.md).
+enforced unless you choose `--learn-mode ask`. For learning, register the same
+command for `PostToolUse` as well
+([`examples/hooks/claude-code-settings-learn.json`](../examples/hooks/claude-code-settings-learn.json)):
+it records which calls ran, so an ask counts only after your yes, and it never
+answers the host. See [LEARNING.md](LEARNING.md).
 
 Every decision is a line in the audit log, with `host`, `host_tool`,
 `session_id`, `permission_mode` and the host's `tool_use_id` as the
@@ -191,6 +195,12 @@ Claude Code:
   Any other non-zero exit is a non-blocking error and the tool runs. A hook
   that times out, or whose command cannot start (exit 127), does not block.
 - A hook's `allow` does not override deny or ask rules in settings.
+- `PostToolUse` (checked 2026-10-26) carries the same fields plus
+  `tool_response`, and fires only after a tool call completed: not for one
+  refused at the prompt (`PostToolUseFailure` covers a call that failed). Exit
+  2, a `decision`, `additionalContext` or `updatedToolOutput` there reach the
+  model, so the hook uses none of them; another non-zero exit shows the user a
+  hook error and changes nothing.
 - `matcher` with only letters, digits, `_`, `-`, spaces, `,` and `|` is an exact
   list of tool names; anything else is an unanchored regular expression. `timeout` is in
   seconds and defaults to 600.
@@ -247,7 +257,9 @@ These are the boundaries of a hook, stated plainly:
 - **Each call is its own session.** Taint does not carry from one hook call to
   the next. With network deny-all every network call is blocked anyway.
 - **The audit records the request for approval, not the answer.** The human's
-  choice in the host's prompt never reaches the hook.
+  choice in the host's prompt never reaches the audit log. In learning mode the
+  trace's `ran` records (`PostToolUse`) show which calls ran
+  ([LEARNING.md](LEARNING.md#why-posttooluse)).
 - **Check and use are separate.** The host runs the tool after the hook
   answers; a symlink swapped in between is not seen (TOCTOU).
 - **Linux and macOS only.** The PowerShell tool is not parsed: matched, it is
