@@ -7,7 +7,9 @@ session attempted, observing before blocking:
     record    vt-agent-firewall-hook --learn TRACE appends one observation per
               request: the normalized action and what the policy decided.
               Registered for PostToolUse too, it adds a `ran` record for each
-              tool call the host ran, so an ask counts only once you said yes
+              tool call the host ran, so an ask counts only once you said yes.
+              vt-agent-firewall-mcp --learn TRACE records the MCP calls it
+              proxies the same way (enforce only)
     propose   vt-agent-firewall-propose replays the observations against the
               policy and writes a proposed policy and a report; it never
               applies anything
@@ -125,6 +127,8 @@ UNCHANGED_WHY = {
     "unknown-tool": "a tool the firewall has no policy for",
     "mcp-protected-path": "an MCP argument names a protected path",
     "mcp-sandbox": "an MCP argument leaves the sandbox",
+    "mcp-resources-denied": "resources are denied unless mcp_resources lists the "
+                            "server: a decision about that server",
     "parse-error": "input the firewall could not parse",
     "hook-unsupported": "a call the hook cannot check",
     "fail-closed": "the audit store was unavailable",
@@ -448,7 +452,8 @@ def read_traces(paths, sandbox_root: Path) -> list[Observation]:
             if raw.get("sandbox_root") != str(sandbox_root):
                 raise TraceError(f"{where}: recorded with sandbox "
                                  f"{raw.get('sandbox_root')}, but this policy's sandbox "
-                                 f"is {sandbox_root} (use the hook's --base-dir)")
+                                 f"is {sandbox_root} (use the --base-dir the hook or "
+                                 f"the MCP proxy used)")
             kind = raw.get("kind", "decision")        # version 1 has decisions only
             if kind == "ran":
                 key = _ran_key(raw)
@@ -511,6 +516,8 @@ def replay_request(obs: Observation) -> ActionRequest | None:
         elif obs.tool == "mcp.call":
             params = {"server": n["server"], "tool": n["tool"],
                       "arguments": n["arguments"]}
+        elif obs.tool == "mcp.resource":
+            params = {"server": n["server"], "uri": n["uri"]}
         else:
             return None
     except (KeyError, TypeError):
@@ -599,8 +606,10 @@ def propose(policy_path: str | Path, trace_paths, base_dir: str | Path | None = 
             return f"{verb} {n['command_line']}"
         if obs.tool == "net.request" and isinstance(n.get("url"), str):
             return f"{verb} {n['url']}"
-        if obs.tool == "mcp.call":
-            return f"{verb} {n.get('server')}/{n.get('tool')}"
+        if obs.tool == "mcp.call" and isinstance(n.get("server"), str):
+            return f"{verb} {n['server']}/{n.get('tool')}"
+        if obs.tool == "mcp.resource" and isinstance(n.get("server"), str):
+            return f"{verb} {n['server']} {n.get('uri')}"
         return verb
 
     groups: dict[tuple[str, str, str], Group] = {}
@@ -968,9 +977,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="vt-agent-firewall-propose",
         description="Turn learning traces recorded by `vt-agent-firewall-hook --learn` "
-                    "into a proposed policy and a report. An ask counts only when the "
-                    "trace shows it ran (the hook registered for PostToolUse). Nothing "
-                    "is applied: review the report and copy what you accept.")
+                    "or `vt-agent-firewall-mcp --learn` into a proposed policy and a "
+                    "report. An ask counts only when the trace shows it ran (the hook "
+                    "registered for PostToolUse). Nothing is applied: review the "
+                    "report and copy what you accept.")
     parser.add_argument("traces", nargs="+", metavar="TRACE",
                         help="learning trace(s); several are merged")
     parser.add_argument("--policy", required=True,

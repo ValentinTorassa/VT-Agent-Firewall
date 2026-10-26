@@ -8,6 +8,7 @@ agent session attempted. Observe before blocking, as
 ```text
 agent session → vt-agent-firewall-hook --learn TRACE    PreToolUse: one observation per request; the policy still decides
                                                         PostToolUse: a record that the call ran, so an ask counts only after your yes
+                vt-agent-firewall-mcp --learn TRACE     the MCP proxy: one observation per tools/call and resources/read
               → vt-agent-firewall-propose TRACE...      replay against the policy: a proposed policy and a report
               → you                                     review the report, copy what you accept
 ```
@@ -70,6 +71,40 @@ only, never `tool_response`, which can carry a file's contents. Without
 
 Codex needs no `PostToolUse` entry: it cannot ask from a hook, so every
 `require_approval` there is already a denial (`approval-denied`).
+
+### In the MCP proxy
+
+`vt-agent-firewall-mcp` takes the same `--learn TRACE`, so an MCP-only setup can
+use `vt-agent-firewall-propose` too:
+
+```json
+"args": ["--policy", "/path/to/policy.json", "--audit", "/path/to/mcp-audit.jsonl",
+         "--learn", "/path/to/learn.jsonl", "--server-name", "filesystem", "--",
+         "npx", "-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"]
+```
+
+It keeps the hook's guarantees:
+
+- **One observation per request** the policy decides: each `tools/call` and
+  `resources/read`, written before anything reaches the server. `tools/list`,
+  relayed methods, batches and dropped notifications are not decided by the
+  policy, so they are not observed.
+- **The answers do not change.** The proxy relays and refuses exactly as
+  without `--learn`; the only difference is the next point.
+- **The trace is protected.** It is added to the protected paths, so a tool
+  argument that names it is refused (`mcp-protected-path`).
+- **Fail-closed.** If the trace cannot be opened, or a write to it fails, every
+  call from then on is refused (`fail-closed`) until the proxy restarts, as with
+  an unavailable audit log: an allowed call's intent is resolved as
+  `not_executed`, and nothing reaches the server.
+
+It records in `enforce` mode only: there is no `--learn-mode` and no ask mode,
+because the proxy has no prompt to turn a refusal into. Observations carry
+`host: "mcp-proxy"`, `host_tool` `tools/call` or `resources/read`, and one
+generated `session_id` per proxy run (`mcp-<server>-<id>`), since the proxy is
+one session: its `tainted` flag stays set from the first protected-path access
+on, as the gateway's `taint-session` does. Nothing in a proxy trace is an ask,
+so it needs no `PostToolUse` records.
 
 ### Two modes
 
@@ -239,7 +274,10 @@ ends with the before and after counts.
 `shell_exact` and `network.allow` entries that no observation used are listed as
 unused. `--drop-unused` removes them from the proposal. MCP
 tools are left alone: the hook only sees them when its matcher includes
-`mcp__.*`, so an unused-looking tool may be in use through the MCP proxy.
+`mcp__.*`, so an unused-looking tool may be in use through the MCP proxy. The
+reverse holds for a trace from the proxy alone: it never sees a shell command or
+a file write, so every allowlisted binary and writable directory looks unused.
+Pass `--drop-unused` only with traces that cover the hook too.
 
 ## Walkthrough with `demo_workspace`
 
@@ -401,5 +439,13 @@ Without the second line the write is listed under "Not learned from".
   bound.** Exact commands and network origins are listed with the entry to
   copy; the policy rules behind them, and their own limits, are in the
   [README](../README.md#narrower-grants).
-- **Only the hook records.** The MCP proxy and the library gateway do not write
-  traces yet (`learn.TraceWriter` works with `Gateway.decide` from Python).
+- **An MCP trace proposes nothing by itself.** MCP tools are listed for your
+  decision, never registered, and the proxy hides unregistered tools from
+  `tools/list`, so an agent rarely calls one. A proxy trace shows which
+  registered tools and paths were used and what was refused, and lets the
+  hook's traces be read together with the MCP side of the same work.
+- **The library gateway records only if you wire it.** From Python, write
+  observations with `learn.TraceWriter`: after `Gateway.decide` (what the hook
+  does) or from `Gateway.handle_with_result(req, observe=...)`, which calls the
+  observer before anything executes and refuses the action if it fails (what
+  the proxy does).
