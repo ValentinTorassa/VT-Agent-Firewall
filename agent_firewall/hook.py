@@ -28,7 +28,11 @@ hook (it ignores `ask` and runs the tool), so there it is denied.
 Learning mode (`--learn TRACE`, agent_firewall/learn.py) also appends one
 observation per request to TRACE for `vt-agent-firewall-propose`. The policy is
 still enforced; `--learn-mode ask` (Claude Code only) asks instead of denying a
-call refused only by the shell allowlist or the MCP registry.
+call refused only by the shell allowlist or the MCP registry. Registered for
+`PostToolUse` as well, the same command appends a `ran` record for each tool
+call the host ran, so the proposal can tell an ask you approved from one you
+refused. That event comes after the fact: the hook never answers it (no JSON,
+never exit 2) and only records; without --learn it does nothing.
 
 Fail-closed: unparseable input, a tool it cannot map, an unreadable policy, an
 unavailable audit log or learning trace, an internal error or the hook's own
@@ -37,7 +41,12 @@ A denial is given both ways the hosts understand: JSON on stdout and exit code
 2 with the reason on stderr. Any other non-zero exit would let the tool run,
 so every error path ends in that same denial.
 
-Protocols: https://code.claude.com/docs/en/hooks (PreToolUse) and
+PostToolUse has nothing left to deny. A `ran` record that cannot be written is
+missing, and the proposal treats an ask without one as refused: the evidence
+fails closed. The hook then exits 1, which the host shows the user as a hook
+error without telling the model anything.
+
+Protocols: https://code.claude.com/docs/en/hooks (PreToolUse, PostToolUse) and
 https://developers.openai.com/codex/hooks (PreToolUse).
 """
 
@@ -57,6 +66,7 @@ from pathlib import Path
 
 from . import learn
 from .audit import AuditLogger, AuditUnavailable
+from .config import Config
 from .gateway import Gateway
 from .models import ActionRequest
 
@@ -86,7 +96,7 @@ class DeadlineExceeded(BaseException):
 
 @dataclass
 class Verdict:
-    decision: str        # allow | ask | deny
+    decision: str        # allow | ask | deny; PostToolUse: recorded | error
     reason: str
 
 
@@ -208,7 +218,8 @@ def _string(tool: str, args: dict, key: str) -> str:
 
 # -- evaluation -------------------------------------------------------------------
 
-def evaluate(args: argparse.Namespace, raw: bytes) -> Verdict:
+def evaluate(args: argparse.Namespace, raw: bytes, event: dict | None = None) -> Verdict:
+    """PreToolUse. `event` is `raw` already parsed, when main could parse it."""
     host = args.host
     try:
         gateway = Gateway(args.policy, args.audit, approver=NoApprover(),
@@ -222,8 +233,7 @@ def evaluate(args: argparse.Namespace, raw: bytes) -> Verdict:
         # Self-protection: the agent may neither read nor rewrite the policy
         # that judges it, the log that records it or the trace a policy will
         # be proposed from.
-        own = [Path(os.path.realpath(p)) for p in (args.policy, args.audit, args.learn)
-               if p]
+        own = _own_files(args)
         gateway.config.protected.update(own)
         if args.learn:
             try:
@@ -235,7 +245,7 @@ def evaluate(args: argparse.Namespace, raw: bytes) -> Verdict:
                 record = gateway.refuse(req, "fail-closed", f"{e}; failing closed",
                                         host=host)
                 return Verdict("deny", _blocked(record))
-        return _evaluate_event(gateway, host, raw, trace)
+        return _evaluate_event(gateway, host, raw, trace, event)
     finally:
         if trace is not None:
             trace.close()
@@ -243,8 +253,13 @@ def evaluate(args: argparse.Namespace, raw: bytes) -> Verdict:
             gateway.audit.close()
 
 
+def _own_files(args: argparse.Namespace) -> list[Path]:
+    return [Path(os.path.realpath(p)) for p in (args.policy, args.audit, args.learn) if p]
+
+
 def _evaluate_event(gateway: Gateway, host: str, raw: bytes,
-                    trace: learn.TraceWriter | None = None) -> Verdict:
+                    trace: learn.TraceWriter | None = None,
+                    event: dict | None = None) -> Verdict:
     extra: dict = {"host": host}
 
     def observed(record: dict) -> Verdict | None:
@@ -258,14 +273,8 @@ def _evaluate_event(gateway: Gateway, host: str, raw: bytes,
         return None
 
     try:
-        if len(raw) > MAX_INPUT_BYTES:
-            raise Refusal(f"hook input is larger than {MAX_INPUT_BYTES} bytes")
-        try:
-            event = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as e:
-            raise Refusal(f"hook input is not JSON: {e}") from None
-        if not isinstance(event, dict):
-            raise Refusal("hook input is not a JSON object")
+        if event is None:
+            event = parse_event(raw)
         for key in ("session_id", "permission_mode", "agent_type"):
             if isinstance(event.get(key), str):
                 extra[key] = event[key]
@@ -311,6 +320,55 @@ def _evaluate_event(gateway: Gateway, host: str, raw: bytes,
     if asks:
         return Verdict("ask", "; ".join(asks))
     return Verdict("allow", "agent firewall: allowed by policy")
+
+
+def parse_event(raw: bytes) -> dict:
+    if len(raw) > MAX_INPUT_BYTES:
+        raise Refusal(f"hook input is larger than {MAX_INPUT_BYTES} bytes")
+    try:
+        event = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        raise Refusal(f"hook input is not JSON: {e}") from None
+    if not isinstance(event, dict):
+        raise Refusal("hook input is not a JSON object")
+    return event
+
+
+# -- PostToolUse: the host ran the tool --------------------------------------------
+
+def record_ran(args: argparse.Namespace, event: dict) -> Verdict:
+    """Append a `ran` record to the learning trace: the host ran this call, so
+    if the hook asked, the human said yes.
+
+    Nothing is decided and nothing is audited: the tool already ran. A record
+    that cannot be written is simply missing, and the proposal treats an ask
+    without one as refused. The record holds ids only, never `tool_response`.
+    """
+    if not args.learn:
+        return Verdict("recorded", "nothing to record without --learn")
+    ids = {key: event.get(key) for key in ("session_id", "tool_use_id", "tool_name")}
+    missing = [key for key, value in ids.items() if not (isinstance(value, str) and value)]
+    if missing:
+        return Verdict("error", f"agent firewall: PostToolUse event without "
+                                f"{', '.join(missing)}; not recorded")
+    try:
+        config = Config(args.policy, base_dir=args.base_dir)
+    except Exception as e:  # unreadable or invalid policy
+        return Verdict("error", f"agent firewall: cannot load policy {args.policy}: {e}; "
+                                f"PostToolUse not recorded")
+    try:
+        trace = learn.TraceWriter(args.learn, args.learn_mode, config, args.policy,
+                                  self_protected=_own_files(args))
+    except learn.TraceUnavailable as e:
+        return Verdict("error", f"agent firewall: {e}; PostToolUse not recorded")
+    try:
+        trace.ran(host=args.host, host_tool=ids["tool_name"],
+                  session_id=ids["session_id"], correlation_id=ids["tool_use_id"])
+    except learn.TraceUnavailable as e:
+        return Verdict("error", f"agent firewall: {e}; PostToolUse not recorded")
+    finally:
+        trace.close()
+    return Verdict("recorded", "")
 
 
 def _audit_without_policy(audit_path: str, host: str, reason: str) -> None:
@@ -360,6 +418,21 @@ def emit(verdict: Verdict, host: str, emit_allow: bool, stdout, stderr) -> int:
     return 0
 
 
+def emit_post(verdict: Verdict, stderr) -> int:
+    """PostToolUse: the tool already ran, so the answer must not change what the
+    agent sees. No JSON on stdout (it could add context or replace the tool's
+    output) and never exit 2 (its stderr goes to the model). A failure is exit 1:
+    the host shows the first stderr line to the user as a hook error and goes on.
+    """
+    if verdict.decision == "recorded":
+        return 0
+    reason = verdict.reason
+    if len(reason) > REASON_MAX_CHARS:
+        reason = reason[:REASON_MAX_CHARS] + "…"
+    _write(stderr, reason + "\n")
+    return 1
+
+
 def _json(decision: str, reason: str) -> str:
     return json.dumps({"hookSpecificOutput": {
         "hookEventName": "PreToolUse",
@@ -392,7 +465,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = _Parser(prog="vt-agent-firewall-hook",
                      description="PreToolUse hook for Claude Code and Codex: the "
                                  "agent firewall's policy in front of the host's "
-                                 "own tools. Reads one hook event on stdin.")
+                                 "own tools. Reads one hook event on stdin. With "
+                                 "--learn, also register it for PostToolUse: it "
+                                 "records which calls ran and answers nothing.")
     parser.add_argument("--policy", required=True, help="policy JSON file")
     parser.add_argument("--audit", required=True, help="append-only audit JSONL")
     parser.add_argument("--host", choices=HOSTS, default="claude-code",
@@ -404,8 +479,9 @@ def build_parser() -> argparse.ArgumentParser:
                              "permission prompt (default: stay silent)")
     parser.add_argument("--learn", metavar="TRACE",
                         help="learning mode: also append one observation per "
-                             "request to TRACE (JSONL) for vt-agent-firewall-propose; "
-                             "the policy is still enforced")
+                             "request to TRACE (JSONL) for vt-agent-firewall-propose, "
+                             "and on a PostToolUse event a record that the call ran "
+                             "(an ask counts only then); the policy is still enforced")
     parser.add_argument("--learn-mode", choices=learn.MODES, default="enforce",
                         help="enforce (default): decide exactly as without --learn. "
                              "ask (Claude Code only, NOT protective for what you "
@@ -432,16 +508,25 @@ def main(argv: list[str] | None = None, stdin=None, stdout=None, stderr=None) ->
     if args.learn_mode == "ask" and args.host != "claude-code":
         build_parser().error("--learn-mode ask is for Claude Code only (Codex cannot "
                              "ask from a hook, so every ask would be a denial)")
+    post = False
     try:
         with _deadline(args.deadline):
             raw = stdin.read(MAX_INPUT_BYTES + 1)
-            verdict = evaluate(args, raw if isinstance(raw, bytes) else raw.encode())
+            raw = raw if isinstance(raw, bytes) else raw.encode()
+            try:
+                event = parse_event(raw)
+            except Refusal:
+                event = None             # evaluate() refuses it, and audits that
+            post = event is not None and event.get("hook_event_name") == "PostToolUse"
+            verdict = record_ran(args, event) if post else evaluate(args, raw, event)
     except DeadlineExceeded:
         verdict = Verdict("deny", f"agent firewall: no decision within "
                                   f"{args.deadline:g}s; failing closed")
     except BaseException as e:  # anything unexpected denies, even ^C
         verdict = Verdict("deny", f"agent firewall: internal error "
                                   f"({type(e).__name__}: {e}); failing closed")
+    if post:
+        return emit_post(verdict, stderr)
     return emit(verdict, args.host, args.emit_allow, stdout, stderr)
 
 
