@@ -53,7 +53,7 @@ python3 scripts/run_demo.py --health       # chequeos estáticos de sanidad
 python3 scripts/run_demo.py                # el ataque, a través del gateway
 python3 scripts/run_demo.py --no-firewall  # contraste: el mismo ataque sin el gateway
 python3 -m unittest discover -s tests -v   # AC1–AC12, los modos de falla de OAuth, regresiones de bypass
-python3 scripts/run_corpus.py              # 26 casos sintéticos de inyección, aislados
+python3 scripts/run_corpus.py              # 45 casos sintéticos de inyección, aislados
 python3 scripts/run_learning_demo.py       # modo aprendizaje: registra una sesión, propone una política
 python3 scripts/run_demo.py --reset        # trunca logs/audit.jsonl y restaura el canary
 ```
@@ -75,11 +75,14 @@ datos de `demo_workspace/` son carnada sintética.
 | `fs-write-scope` | require_approval: escritura dentro del sandbox pero fuera de `writable_dirs` |
 | `sh-syntax` | block: una línea que va a correr el shell de un host (`via_shell`) y no es un único comando simple con argumentos literales: sin pipes, redirecciones, encadenamiento, sustitución, variables, globs ni `~` |
 | `sh-allowlist` | block: binario fuera de la allowlist (`curl`, `python3`, `sh`, ...) |
+| `sh-ask` | require_approval: un binario de `shell_ask` cuando pasa todos los demás chequeos de shell; se deniega donde nadie puede contestar ([permisos más acotados](#permisos-más-acotados)) |
+| `sh-exact` | allow: un argv de `shell_exact`, exactamente como está escrito, cuando pasa todos los demás chequeos de shell |
 | `sh-args` | block: opciones fuera de la gramática del binario y predicados de `find` fuera de la allowlist (`-exec`, `-ok`, `-fprint`, `-delete`, ...) |
 | `sh-paths` | block: argv, valores de opciones incluidos (`--file=.env`, `-f.env`), que toca un path protegido o sale del sandbox |
 | `sh-recursive` | block: un recorrido recursivo (`grep -r`, `ls -R`, `find`) llegaría a un path protegido o saldría del sandbox, siguiendo symlinks |
-| `net-deny-all` | block: red deny-total, sin excepciones (ni loopback) |
-| `taint-session` | block adicional: la sesión nombró o alcanzó un path protegido, aunque ese pedido se haya bloqueado |
+| `net-deny-all` | block: red deny-total, sin excepciones (ni loopback); es el `network.mode` por defecto |
+| `net-ok` / `net-allowlist` | con `network.mode` `allowlist`: allow para GET y HEAD a un origen de `network.allow`, block para todo lo demás |
+| `taint-session` | block adicional: la sesión nombró o alcanzó un path protegido, aunque ese pedido se haya bloqueado; después no hay red, `api.call`, `sh-ask` ni `sh-exact` |
 | `mcp-unknown-tool` | block: server/tool MCP fuera del registry |
 | `mcp-protected-path` / `mcp-sandbox` | block: un argumento MCP resuelve a un path protegido o fuera del sandbox |
 | `mcp-resources-denied` | block: lectura de resources MCP, salvo que la política la habilite para ese server |
@@ -90,6 +93,55 @@ datos de `demo_workspace/` son carnada sintética.
 | `learn-ask` | require_approval, sólo en el modo aprendizaje `ask`: una llamada rechazada únicamente por `sh-allowlist` o `mcp-unknown-tool` que nada más rechaza |
 | `api-ok` / `api-approval` / `api-blocked` | decisión por operación para `api.call`, tomada antes de que exista una credencial |
 | `api-unknown-operation` | block: pares audience/operación fuera de la política (default-deny) |
+
+## Permisos más acotados
+
+La allowlist habilita un binario entero y la red es deny-all. Tres claves
+opcionales habilitan menos. Una política sin ellas decide exactamente igual que
+antes, y una entrada mal formada es una política que no carga, así que el hook
+deniega todo.
+
+```json
+{
+  "shell_ask": ["python3", "npm"],
+  "shell_exact": [["python3", "-m", "pytest"], ["npm", "test"]],
+  "network": {
+    "mode": "allowlist",
+    "allow": ["https://docs.python.org", "https://*.pythonhosted.org"]
+  }
+}
+```
+
+- **`shell_ask`**: binarios que el firewall no puede acotar (sin gramática de
+  argumentos) y que un humano aprueba llamada por llamada (`sh-ask`). Claude Code
+  muestra su prompt con el comando exacto; Codex, `bypassPermissions` y un gateway
+  sin terminal deniegan. Sólo nombres sueltos: `/usr/bin/python3`, `./python3` y
+  `VAR=1 python3` no son `python3`.
+- **`shell_exact`**: listas de argv permitidas exactamente como están escritas
+  (`sh-exact`). Una palabra de más o de menos, otra forma de escribir el
+  programa, un prefijo `VAR=valor` o cualquier sintaxis de shell no coinciden. Un
+  programa sin barra coincide sólo escrito así; uno con barra coincide con el
+  archivo al que resuelve, desde cualquier `cwd`. Si el binario además está en
+  `shell_ask`, el comando exacto corre y cualquier otro pregunta.
+- **`network.allow`** (con `"mode": "allowlist"`): GET y HEAD sin cuerpo a los
+  orígenes listados (`net-ok`); todo lo demás es `net-allowlist`. Una entrada es
+  `esquema://host[:puerto][/path]`: esquema y puerto tienen que coincidir, `*.`
+  cubre los nombres debajo de un dominio pero no el dominio, y un path es un
+  prefijo de segmentos enteros. Una URL que dos parsers podrían leer distinto se
+  rechaza en lugar de adivinar: user info (`https://permitido@malo`), una barra
+  invertida, `%` en el host, `127.1` o `2130706433` por `127.0.0.1`, un puerto no
+  canónico, espacios, caracteres no ASCII y `..` (literal o codificado) debajo de
+  un prefijo de path. El executor no sigue redirecciones.
+
+Ninguna se saltea otro chequeo: los paths (para estos dos permisos de shell
+también `@archivo`, `--opt=@archivo` y `-d@archivo`), el sandbox, las opciones
+prohibidas, los recorridos recursivos y `sh-syntax` van primero, y una sesión que
+fue por un path protegido no recibe ninguno (`taint-session`). Lo que no pueden
+hacer: un comando exacto fija el argv, no lo que corre el programa
+(`python3 -m pytest` importa cualquier archivo de tests que el agente pueda
+escribir); un origen permitido puede recibir datos en la misma URL; el firewall
+no resuelve DNS; y en el hook cada llamada es su propia sesión, así que el taint
+no pasa de una llamada a la siguiente.
 
 ## Credenciales delegadas (`api.call`)
 
@@ -234,12 +286,16 @@ python3 scripts/run_learning_demo.py   # el circuito completo sobre demo_workspa
   allowlist de shell o del registry MCP en el prompt de Claude Code cuando nada más
   en la política rechaza la llamada. No te protege de lo que aprobás, y deja de
   preguntar en cuanto la sesión fue por un path protegido.
-- **La propuesta sólo agrega lo que el firewall puede acotar:** un directorio
+- **La propuesta sólo permite lo que el firewall puede acotar:** un directorio
   escribible (el primero debajo de la raíz del sandbox, nunca la raíz ni un
-  directorio oculto) y binarios con gramática de argumentos. Intérpretes, clientes
-  de red, binarios que escriben, tools MCP y archivos en la raíz quedan listados
-  para que decidas vos, con cuántas veces se vieron. Los paths protegidos, el
-  sandbox, la red y los argumentos prohibidos nunca se relajan.
+  directorio oculto) y binarios con gramática de argumentos. Los binarios sin
+  gramática (intérpretes, clientes de red, binarios que escriben) se proponen
+  para `shell_ask`: se pregunta por ellos, nunca se permiten. Sus comandos
+  exactos (`shell_exact`), los orígenes web que buscó la sesión
+  (`network.allow`), las tools MCP y los archivos en la raíz quedan listados
+  para que decidas vos, con la entrada para copiar y cuántas veces se vieron. Los
+  paths protegidos, el sandbox, la red y los argumentos prohibidos nunca se
+  relajan.
 - **No todo es evidencia.** Lo que hizo una sesión después de nombrar o alcanzar un
   path protegido, lo que se rechazó en la aprobación y un ask sin registro de
   `PostToolUse` (dijiste que no) no se aprenden. Antes de imprimir, la propuesta se
@@ -255,7 +311,8 @@ python3 scripts/run_learning_demo.py   # el circuito completo sobre demo_workspa
 agent_firewall/   models, config, policy, argv (gramáticas por binario), shell_syntax,
                   executor, audit, approval, gateway, credentials (token broker),
                   mock_apis, mcp_proxy, hook (PreToolUse de Claude Code / Codex),
-                  learn (modo aprendizaje: trazas y propuestas de política)
+                  learn (modo aprendizaje: trazas y propuestas de política),
+                  network (el parseo estricto de URLs detrás de network.allow)
 corpus/           attacks.json: inyecciones sintéticas y la decisión esperada
 policies/         default.json: sandbox, paths protegidos, allowlists, registry MCP
 scripts/          run_demo.py, mock_receiver.py, run_corpus.py, score_model_following.py,
@@ -268,7 +325,8 @@ tests/            tests de aceptación AC1–AC12, test_delegation.py (los cuatr
                   stdio), test_bypasses.py (cada bypass encontrado en la revisión,
                   como regresión), test_hook.py (el hook PreToolUse, con eventos
                   sintéticos), test_learn.py (modo aprendizaje: registro, modo ask,
-                  propuestas)
+                  propuestas), test_policy_model.py (shell_ask, shell_exact,
+                  network.allow y sus bypasses)
 logs/             audit.jsonl (fuera del sandbox, append-only)
 docs/             THREAT_MODEL.md, AGENT_HOOKS.md, LEARNING.md; build-prompts/ (cómo
                   se armó la primera versión)
@@ -295,6 +353,9 @@ Son límites deliberados de la v0, no ocultos:
   la herramienta igual si el hook se pasa del timeout o no arranca, y los alias o el
   `PATH` deciden qué corre de verdad bajo un nombre permitido. Ver
   [docs/AGENT_HOOKS.md](docs/AGENT_HOOKS.md#limits).
+- **Un permiso acotado es tan acotado como su entrada.** Un comando exacto fija el
+  argv, no lo que hace el programa; un origen permitido puede recibir datos en la
+  URL. Ver [Permisos más acotados](#permisos-más-acotados).
 - **El modo aprendizaje propone; no juzga intenciones.** Una sesión que nunca tocó
   un path protegido parece trabajo aunque la maneje una inyección, y un ask que
   aprobaste cuenta como cualquier otra evidencia. Revisá cada permiso y sus
@@ -317,16 +378,20 @@ Son límites deliberados de la v0, no ocultos:
 
 ## Corpus de ataques reproducible
 
-`corpus/attacks.json` guarda veintiséis instrucciones sintéticas no confiables (tres son
-controles benignos), los pedidos de herramienta que generan y la decisión y regla
+`corpus/attacks.json` guarda cuarenta y cinco instrucciones sintéticas no confiables
+(cuatro son controles benignos), los pedidos de herramienta que generan y la decisión y regla
 esperadas. Desde 0.1.1 incluye las clases de bypass encontradas en la revisión:
 lecturas recursivas que llegan a un secreto sin nombrarlo, opciones con archivo como
 valor, un `find` que escribe, un archivo dentro de un directorio protegido y
 argumentos MCP fuera del sandbox o con un nombre inesperado. Desde 0.2.0 incluye
 líneas que el shell de un host expandiría (`via_shell`): encadenamiento, un glob,
-sustitución de comandos y una redirección. Un caso puede sumar
-symlinks (`setup.symlinks`) o paths protegidos (`policy.protected_paths_add`) a su
-propio workspace. `scripts/run_corpus.py` le da a cada caso un workspace temporal y
+sustitución de comandos y una redirección. Los casos de `shell_ask`, `shell_exact`
+y `network.allow` prueban los bypasses de cada permiso: un argumento de más, el
+programa escrito con un path o con `VAR=valor`, encadenamiento, `@.env`, user
+info, una barra invertida, un host parecido, otras formas de escribir una IP, otro
+puerto o esquema, un POST y una sesión con taint. Un caso puede sumar symlinks
+(`setup.symlinks`), paths protegidos (`policy.protected_paths_add`) o claves de
+política (`policy.set`) a su propio workspace. `scripts/run_corpus.py` le da a cada caso un workspace temporal y
 una sesión de gateway nuevos, chequea cada decisión y registro de auditoría, y
 verifica que el canary no haya cambiado.
 

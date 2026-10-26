@@ -22,7 +22,7 @@ host tool call (JSON on stdin)
 | `Bash`, `Monitor` with `command` | `shell.run`, `via_shell` | The host gives the line to bash or zsh, so it must first pass `sh-syntax` (below). |
 | `Read` | `fs.read` | |
 | `Write`, `Edit`, `NotebookEdit`, legacy `MultiEdit` | `fs.write` | Written content is audited as SHA-256 plus length. |
-| `WebFetch`, `Monitor` with `ws` | `net.request` | Network is deny-all, so these are always denied. |
+| `WebFetch`, `Monitor` with `ws` | `net.request` | Denied unless the policy's `network.allow` lists the origin (GET only; see the [README](../README.md#narrower-grants)). |
 | `mcp__<server>__<tool>` | `mcp.call` | Only if you match MCP tools; they then need an `mcp_registry` entry. |
 | Codex `apply_patch` | `fs.write` per file | Every `Add`, `Update`, `Delete` and `Move to` path in the patch. |
 | anything else the matcher sends | unknown tool | Default-deny (`unknown-tool`). |
@@ -165,7 +165,7 @@ nothing is enforced. Codex's `Bash` covers both the shell tool and unified exec
 | `Bash: grep -r KEY .` (reaches `.env` without naming it) | deny `sh-recursive` |
 | `Bash: grep -f .env src` (a file-valued option) | deny `sh-paths` |
 | `Bash: find . -name x -exec sh -c ...` | deny `sh-args` |
-| `Bash: curl ...`, `python3 ...`, `cd x` | deny `sh-allowlist` |
+| `Bash: curl ...`, `python3 ...`, `cd x` | deny `sh-allowlist` (ask `sh-ask` with the binary on `shell_ask`; Codex: deny) |
 | `Bash: cat notes.txt \| head`, `cat $(echo .env)`, `cat .e*` | deny `sh-syntax` |
 | `WebFetch`, `Monitor` on a WebSocket | deny `net-deny-all` |
 | a tool in the matcher with no mapping | deny `unknown-tool` |
@@ -255,7 +255,10 @@ These are the boundaries of a hook, stated plainly:
   `RemoteTrigger` send data out. Deny the ones you do not use with Claude Code
   permission rules. Files you attach with `@` are inserted without any tool call.
 - **Each call is its own session.** Taint does not carry from one hook call to
-  the next. With network deny-all every network call is blocked anyway.
+  the next. With network deny-all every network call is blocked anyway; with a
+  network allowlist, or `shell_ask` and `shell_exact` entries, a call after a
+  denied `Read .env` is decided on its own, so keep those entries to what you
+  would allow from any session.
 - **The audit records the request for approval, not the answer.** The human's
   choice in the host's prompt never reaches the audit log. In learning mode the
   trace's `ran` records (`PostToolUse`) show which calls ran
