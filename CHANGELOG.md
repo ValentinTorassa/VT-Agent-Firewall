@@ -40,6 +40,16 @@
   even when the binary is off the allowlist (`curl -d @.env` did not).
 - Corpus: the four spellings from the issue, `name@.env` and two sandbox escapes.
 
+- **The MCP proxy protects its own policy file and audit log** (#8). At startup
+  `vt-agent-firewall-mcp` adds the real paths of `--policy` and `--audit`
+  (`realpath`: symlinks and relative paths resolved) to the protected paths, as
+  the agent hook does with its own: a `tools/call` or `resources/read` that names
+  either is refused with `mcp-protected-path` before the server sees it, and taints
+  the session like any protected path. **Behaviour change:** calls that name
+  either file used to be decided like any other path (inside the sandbox, a read
+  or a registered write reached the server). With `--learn`, each observation's
+  `self_protected` lists both next to the trace, so the proposal keeps them
+  protected when it replays.
 - **Learning mode counts an ask only after your yes** (#4). Registered for
   `PostToolUse` as well, `vt-agent-firewall-hook --learn` appends a `ran` record
   (session, `tool_use_id`, tool name; never the tool's output) for each call the

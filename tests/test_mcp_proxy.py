@@ -36,9 +36,9 @@ TIMEOUT = 10
 class McpClient:
     """Just enough of an MCP host: newline-delimited JSON-RPC over pipes."""
 
-    def __init__(self, argv: list[str]):
+    def __init__(self, argv: list[str], cwd: Path = REPO):
         env = {**os.environ, "PYTHONPATH": str(REPO)}
-        self.proc = subprocess.Popen(argv, cwd=REPO, env=env, text=True,
+        self.proc = subprocess.Popen(argv, cwd=cwd, env=env, text=True,
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=subprocess.PIPE, bufsize=1)
         self.lines: queue.Queue = queue.Queue()
@@ -97,12 +97,13 @@ class McpProxyTestBase(unittest.TestCase):
         if self.client and self.client.proc.poll() is None:
             self.client.close()
 
-    def start(self, *extra: str) -> McpClient:
+    def start(self, *extra: str, policy=None, audit=None, cwd: Path = REPO,
+              server: list[str] | None = None) -> McpClient:
         self.client = McpClient([
             sys.executable, "-m", "agent_firewall.mcp_proxy",
-            "--policy", str(self.policy), "--audit", str(self.audit),
+            "--policy", str(policy or self.policy), "--audit", str(audit or self.audit),
             "--base-dir", str(self.tmp), "--server-name", "fs", *extra,
-            "--", sys.executable, str(SERVER), str(self.ws)])
+            "--", *(server or [sys.executable, str(SERVER), str(self.ws)])], cwd=cwd)
         init = self.client.request("initialize", {
             "protocolVersion": "2025-06-18", "capabilities": {},
             "clientInfo": {"name": "test", "version": "0"}})
@@ -226,6 +227,107 @@ class TestMcpProxy(McpProxyTestBase):
         self.assertEqual(client.request("ping")["result"], {})
 
 
+# The naive server, logging every message it receives: what the proxy relayed.
+RECORDING_SERVER = """\
+import json, sys
+log_path, root = sys.argv[1], sys.argv[2]
+sys.argv = [sys.argv[0], root]
+sys.path.insert(0, {examples!r})
+import fs_mcp_server as server
+with open(log_path, "a") as log:
+    for line in sys.stdin:
+        if not line.strip():
+            continue
+        log.write(line)
+        log.flush()
+        reply = server.handle(json.loads(line))
+        if reply is not None:
+            sys.stdout.write(json.dumps(reply) + "\\n")
+            sys.stdout.flush()
+"""
+
+
+class TestOwnFiles(McpProxyTestBase):
+    """The proxy protects its policy file and audit log, as the hook does (#8).
+
+    Both are kept inside the sandbox here, with write_file registered and
+    resources enabled, so without that protection every call below would be
+    allowed and reach the server."""
+
+    def setUp(self):
+        super().setUp()
+        policy = json.loads(self.policy.read_text())
+        policy["mcp_registry"]["fs"].append("write_file")
+        policy["mcp_resources"] = ["fs"]
+        self.policy = self.ws / "normal" / "policy.json"
+        self.policy.write_text(json.dumps(policy))
+        self.audit = self.ws / "normal" / "mcp-audit.jsonl"
+        self.received = self.tmp / "received.jsonl"
+        recorder = self.tmp / "recording_server.py"
+        recorder.write_text(RECORDING_SERVER.format(examples=str(REPO / "examples")))
+        self.server = [sys.executable, str(recorder), str(self.received), str(self.ws)]
+
+    def received_calls(self) -> list[dict]:
+        messages = [json.loads(l) for l in self.received.read_text().splitlines() if l]
+        return [m for m in messages
+                if m.get("method") in ("tools/call", "resources/read")]
+
+    def assertRefused(self, client, name: str):
+        """Every spelling of `name` is refused by the proxy, read or written."""
+        target = self.ws / "normal" / name
+        for path in (f"normal/{name}", str(target), f"malicious_repo/../normal/{name}"):
+            for tool, arguments in (("read_file", {"path": path}),
+                                    ("write_file", {"path": path, "content": "{}"})):
+                result = client.call(tool, **arguments)
+                self.assertTrue(result["isError"], (tool, path))
+                self.assertIn("mcp-protected-path", result["content"][0]["text"])
+        reply = client.request("resources/read", {"uri": f"file://{target}"})
+        self.assertIn("mcp-protected-path", reply["error"]["message"])
+
+    def test_calls_naming_the_policy_or_the_audit_never_reach_the_server(self):
+        before = self.policy.read_text()
+        client = self.start(server=self.server)
+        # The recorder sees what the proxy lets through.
+        self.assertFalse(client.call("read_file", path="normal/notes.txt")["isError"])
+        notes = f"file://{self.ws / 'normal' / 'notes.txt'}"
+        client.request("resources/read", {"uri": notes})
+        for name in ("policy.json", "mcp-audit.jsonl"):
+            with self.subTest(name=name):
+                self.assertRefused(client, name)
+        client.close()
+        self.assertEqual([(m["method"], m["params"].get("arguments", m["params"]))
+                          for m in self.received_calls()],
+                         [("tools/call", {"path": "normal/notes.txt"}),
+                          ("resources/read", {"uri": notes})])
+        self.assertEqual(self.policy.read_text(), before)
+        refused = [r for r in self.audit_records()
+                   if r["rule_id"] == "mcp-protected-path"]
+        self.assertEqual(len(refused), 2 * 7)
+        self.assertEqual({r["outcome"] for r in refused}, {"not_executed"})
+
+    def test_a_symlinked_policy_is_protected_through_its_target(self):
+        link = self.tmp / "policy-link.json"
+        link.symlink_to(self.policy)
+        client = self.start(policy=link, server=self.server)
+        self.assertRefused(client, "policy.json")
+        client.close()
+        self.assertEqual(self.received_calls(), [])
+
+    def test_a_relative_audit_path_is_resolved_against_the_working_directory(self):
+        client = self.start(audit="demo_workspace/normal/mcp-audit.jsonl", cwd=self.tmp,
+                            server=self.server)
+        self.assertRefused(client, "mcp-audit.jsonl")
+        client.close()
+        self.assertEqual(self.received_calls(), [])
+        self.assertTrue(self.audit_records())
+
+    def test_other_files_next_to_them_stay_readable(self):
+        # Another file in normal/ is still readable: only the proxy's own are protected.
+        (self.ws / "normal" / "other.json").write_text("{}")
+        client = self.start(server=self.server)
+        self.assertFalse(client.call("read_file", path="normal/other.json")["isError"])
+
+
 class TestLearning(McpProxyTestBase):
     """`--learn TRACE`: the same guarantees as the hook's."""
 
@@ -282,7 +384,10 @@ class TestLearning(McpProxyTestBase):
             self.assertEqual((obs["v"], obs["kind"], obs["mode"], obs["host"]),
                              (2, "decision", "enforce", "mcp-proxy"))
             self.assertEqual(obs["sandbox_root"], str(self.ws.resolve()))
-            self.assertEqual(obs["self_protected"], [str(self.trace.resolve())])
+            # The policy and the audit log too, as the hook records its own.
+            self.assertEqual(obs["self_protected"],
+                             sorted(str(p.resolve())
+                                    for p in (self.policy, self.audit, self.trace)))
         # The proxy is one session: taint sticks from the .env read on.
         self.assertEqual([o["tainted"] for o in observations],
                          [False, False, False, False, True, True])

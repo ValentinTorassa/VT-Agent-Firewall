@@ -91,7 +91,8 @@ It keeps the hook's guarantees:
   policy, so they are not observed.
 - **The answers do not change.** The proxy relays and refuses exactly as
   without `--learn`; the only difference is the next point.
-- **The trace is protected.** It is added to the protected paths, so a tool
+- **The trace is protected.** It is added to the protected paths, like the
+  policy file and the audit log (protected with or without `--learn`), so a tool
   argument that names it is refused (`mcp-protected-path`).
 - **Fail-closed.** If the trace cannot be opened, or a write to it fails, every
   call from then on is refused (`fail-closed`) until the proxy restarts, as with
@@ -146,7 +147,7 @@ under the same lock:
 | `tool`, `normalized` | the request after normalization: canonical paths, parsed argv, URL. Written content is a SHA-256 and a length, as in the audit log |
 | `decision`, `rule_id`, `rules_matched` | what the policy decided when it was recorded |
 | `tainted` | the request named or reached a protected path |
-| `sandbox_root`, `policy_sha256`, `self_protected` | provenance: the proposal refuses a trace from another sandbox, notes one recorded under another policy file, and keeps the hook's own files protected when it replays |
+| `sandbox_root`, `policy_sha256`, `self_protected` | provenance: the proposal refuses a trace from another sandbox, notes one recorded under another policy file, and keeps the recorder's own files (the policy, the audit log, the trace) protected when it replays |
 
 A `ran` record (`kind: "ran"`) has `v`, `mode`, `ts`, `host`, `host_tool`,
 `session_id`, `correlation_id` (the `tool_use_id`) and the same provenance

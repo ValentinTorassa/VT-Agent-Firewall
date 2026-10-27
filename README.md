@@ -167,6 +167,9 @@ client launches the proxy as if it were the server; the proxy launches the real 
   outside the sandbox is blocked, not only a protected one;
 - `resources/read` goes through the policy and is denied unless the server is listed
   in `mcp_resources`;
+- the policy file and the audit log given on the command line are added to the
+  protected paths, after `realpath`, so a call cannot read or rewrite them
+  (`mcp-protected-path`);
 - only known MCP methods are relayed; JSON-RPC batches are rejected and a
   `tools/call` sent as a notification is dropped, so nothing reaches the server
   around the policy;
