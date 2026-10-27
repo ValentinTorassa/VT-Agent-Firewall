@@ -8,13 +8,47 @@ repo root for policies/default.json).
 from __future__ import annotations
 
 import json
+import os
+import re
+from dataclasses import dataclass
 from pathlib import Path
+
+from . import network
 
 
 DEFAULT_MCP_PATH_ARGUMENTS = [
     "path", "paths", "source", "destination", "file", "files", "filename",
     "filepath", "file_path", "dir", "directory", "src", "dest", "target", "root",
 ]
+
+
+# A program name on shell_ask, or the first word of a shell_exact entry: one
+# word, no assignment (`VAR=value cmd` runs cmd), no whitespace or controls.
+_PROGRAM = re.compile(r"^[^\s=\x00-\x1f\x7f]+$")
+
+
+@dataclass(frozen=True)
+class ExactCommand:
+    """One `shell_exact` entry: an argv allowed exactly as written.
+
+    A bare program name matches only that spelling (`python3`, never
+    `/usr/bin/python3` or `./python3`): which file it is, PATH decides. A
+    program written with a slash resolves against the policy's base directory,
+    and matches a request whose program resolves to the same file from the
+    request's cwd, so `./run.sh` cannot be pointed at another script by
+    changing directory.
+    """
+    argv: tuple[str, ...]
+    program_path: Path | None
+
+    def matches(self, argv: list[str], cwd: Path) -> bool:
+        if len(argv) != len(self.argv) or tuple(argv[1:]) != self.argv[1:]:
+            return False
+        if self.program_path is None:
+            return argv[0] == self.argv[0]
+        if "/" not in argv[0] or "\0" in argv[0]:
+            return False
+        return Path(os.path.realpath(cwd / argv[0])) == self.program_path
 
 
 class Config:
@@ -41,7 +75,27 @@ class Config:
         self.shell_forbidden_args = {
             k: set(v) for k, v in raw.get("shell_forbidden_args", {}).items()
         }
-        self.network_mode = raw.get("network", {}).get("mode", "deny_all")
+        # Binaries the firewall cannot bound but a human may approve call by
+        # call (`sh-ask`), and exact argv lists allowed as written (`sh-exact`).
+        self.shell_ask = set(self._programs(raw.get("shell_ask", []), "shell_ask"))
+        both = sorted(self.shell_allowlist & self.shell_ask)
+        if both:
+            raise ValueError(f"on both shell_allowlist and shell_ask: {both}")
+        self.shell_exact = [self.exact_entry(base, entry, "shell_exact")
+                            for entry in self._list(raw.get("shell_exact", []),
+                                                    "shell_exact")]
+        net = raw.get("network", {})
+        self.network_mode = net.get("mode", "deny_all")
+        # Only "allowlist" lets anything through. Any other mode denies all
+        # network, as before the allowlist existed.
+        allow = net.get("allow")
+        if self.network_mode == "allowlist":
+            self.network_allow = [network.parse_entry(e)
+                                  for e in self._list(allow or [], "network.allow")]
+        elif allow not in (None, []):
+            raise ValueError('network.allow needs "mode": "allowlist"')
+        else:
+            self.network_allow = []
         self.mcp_registry = {
             srv: set(tools) for srv, tools in raw.get("mcp_registry", {}).items()
         }
@@ -69,6 +123,38 @@ class Config:
             aud: {op: dict(rule) for op, rule in ops.items()}
             for aud, ops in raw.get("apis", {}).items()
         }
+
+    @staticmethod
+    def _list(value, key: str) -> list:
+        if not isinstance(value, list):
+            raise ValueError(f"{key} must be a list")
+        return value
+
+    @classmethod
+    def _programs(cls, value, key: str) -> list[str]:
+        names = cls._list(value, key)
+        for name in names:
+            if not isinstance(name, str) or not _PROGRAM.match(name) or "/" in name:
+                raise ValueError(f"{key}: {name!r} is not a program name (one word, "
+                                 f"no path, no VAR=value)")
+        return names
+
+    @classmethod
+    def exact_entry(cls, base: Path, entry, key: str = "shell_exact") -> ExactCommand:
+        if not (isinstance(entry, list) and entry
+                and all(isinstance(w, str) and "\0" not in w for w in entry)):
+            raise ValueError(f"{key}: {entry!r} is not an argv list such as "
+                             f'["python3", "-m", "pytest"]')
+        program = entry[0]
+        if not _PROGRAM.match(program):
+            raise ValueError(f"{key}: {program!r} is not a program (one word, no "
+                             f"VAR=value; write the command as a list of words)")
+        return ExactCommand(tuple(entry),
+                            cls._abs(base, program) if "/" in program else None)
+
+    def exact_command(self, argv: list[str], cwd: Path) -> ExactCommand | None:
+        """The shell_exact entry this argv matches, run from `cwd`, if any."""
+        return next((e for e in self.shell_exact if e.matches(argv, cwd)), None)
 
     @staticmethod
     def _abs(base: Path, p: str) -> Path:

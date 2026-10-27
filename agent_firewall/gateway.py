@@ -275,9 +275,12 @@ class Gateway:
             if not d.is_dir():
                 raise RuntimeError(f"writable dir missing: {d}")
         ok.append(f"writable: {[str(d) for d in cfg.writable_dirs]}")
-        if cfg.network_mode != "deny_all":
+        if cfg.network_mode == "allowlist":
+            ok.append(f"network: allowlist {[e.text for e in cfg.network_allow]}")
+        elif cfg.network_mode != "deny_all":
             raise RuntimeError(f"unexpected network mode: {cfg.network_mode}")
-        ok.append("network: deny_all")
+        else:
+            ok.append("network: deny_all")
         ok.append(f"mcp registry: {sorted(cfg.mcp_registry)}")
         return ok
 

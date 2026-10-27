@@ -61,7 +61,7 @@ Status: **Implemented** (covered by tests or the demo), **Partial**, **Planned**
 | Risk | How the gateway addresses it | Status |
 |---|---|---|
 | LLM01 Prompt Injection | Containment, not detection: default-deny policy, protected paths, network deny, taint. The demo is an indirect injection. | Implemented (containment) |
-| LLM02 Sensitive Information Disclosure | Protected paths, and everything under them, blocked after `realpath`: named directly, through an option value, or reached by a recursive walk (symlinks followed). Naming or reaching one, blocked or not, taints the session, and every network and API action is blocked afterwards. | Partial (path-level taint) |
+| LLM02 Sensitive Information Disclosure | Protected paths, and everything under them, blocked after `realpath`: named directly, through an option value, or reached by a recursive walk (symlinks followed). Naming or reaching one, blocked or not, taints the session, and every network and API action is blocked afterwards, as are the `shell_ask` and `shell_exact` grants. A network allowlist, when the policy has one, admits only GET and HEAD to listed origins and refuses URLs two parsers could read differently. | Partial (path-level taint) |
 | LLM03 Supply Chain | MCP registry (unlisted tools are hidden and blocked) and `--pin PATH=SHA256` for the server's code. | Partial |
 | LLM05 Improper Output Handling | Model output never reaches a shell: `shlex` to argv, `shell=False`, executor sees normalized params only. | Implemented |
 | LLM06 Excessive Agency | Default-deny per tool, shell allowlist with a per-binary argument grammar, approval for out-of-scope writes, per-call tokens scoped to one audience and operation. | Implemented |
@@ -134,7 +134,17 @@ attack works, and the same attack stopped by the gateway and the broker.
   it went for a protected path, from a refusal at approval, or from an ask that no
   `PostToolUse` record shows ran; anything else a hijacked session did looks like
   work, so a human reviews every grant ([LEARNING.md](LEARNING.md#limits)). `--learn-mode ask` lets a human approve
-  calls the allowlist or the MCP registry would refuse.
+  calls the allowlist or the MCP registry would refuse. The proposal may add
+  `shell_ask` entries (asks, never allows); exact commands and network origins
+  are only listed for a human decision.
+- The narrower grants are as narrow as their entries. `shell_ask` relies on a
+  human reading each command, which habit erodes. A `shell_exact` entry fixes the
+  argv, not what the program does: an interpreter or test runner runs files the
+  agent may be able to write. An origin on `network.allow` can still receive data
+  in the URL (a GET is enough to exfiltrate to a host that logs it); the firewall
+  does not resolve DNS, so a listed name that resolves to an internal address
+  (DNS rebinding) is not detected; and a host may follow a same-host redirect
+  out of a path prefix (the gateway's executor follows none).
 - The agent hook is a policy check, not isolation: an allowed binary runs with the
   host's full rights. Whoever controls the host's settings can remove or disable
   it, and the host runs the tool when the hook times out or cannot start; only the

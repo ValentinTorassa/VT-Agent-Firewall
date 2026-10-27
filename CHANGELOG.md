@@ -32,6 +32,38 @@
   action is not executed and its intent is resolved as a `fail-closed` block.
 - `vt-agent-firewall-propose` replays `mcp.resource` observations against the
   policy too, and explains `mcp-resources-denied`.
+- **Narrower grants in the policy** (#3): three optional keys, each lifting one
+  refusal and nothing else. Policies without them decide exactly as before; a
+  malformed entry is a policy that cannot load, so the hook denies everything.
+  - `shell_ask`: binaries off the allowlist that become `require_approval`
+    (`sh-ask`) instead of `sh-allowlist`, when every other shell check passes.
+    Bare names only. Denied where nobody can answer: Codex, `bypassPermissions`,
+    a gateway without a terminal.
+  - `shell_exact`: argv lists allowed exactly as written (`sh-exact`). Extra or
+    missing words, `VAR=value` prefixes, shell syntax and other spellings of the
+    program (`/usr/bin/python3`, `./python3`) do not match; a program written
+    with a slash matches the file it resolves to.
+  - `network.mode: "allowlist"` with `network.allow`: GET and HEAD without a body
+    to listed origins (`net-ok`), everything else `net-allowlist`. Entries are
+    `scheme://host[:port][/path]`, with `*.` for subdomains. URLs that two
+    parsers could read differently are refused: user info, backslashes, `%` in
+    the host, non-canonical IPs (`127.1`, `2130706433`) and ports, whitespace,
+    non-ASCII, dot segments under a path prefix.
+  - Paths, the sandbox, options, recursive walks and `sh-syntax` still apply, and
+    the two shell grants also look inside `@file`, `--opt=@file` and `-d@file`.
+    A tainted session gets none of the three (`taint-session`).
+  - The executor no longer follows redirects; a 3xx is reported, not fetched.
+- `vt-agent-firewall-propose` proposes `shell_ask` for a binary without an
+  argument grammar (an ask, never an allow) and lists, with the entry to copy,
+  the exact commands the session ran (`shell_exact`) and the origins it fetched
+  (`network.allow`, flagged when local or cleartext): allowing what the firewall
+  cannot bound stays a human decision. An `sh-ask` or `learn-ask` counts only
+  with a `ran` record, so a refused prompt never becomes a candidate. Unused
+  entries of the new keys are reported and dropped with `--drop-unused`.
+- Corpus: 45 cases (19 new) with per-case policy keys (`policy.set`), covering
+  each new grant's bypasses; `tests/test_policy_model.py`; README, README.es,
+  `docs/LEARNING.md`, `docs/AGENT_HOOKS.md` and the threat model document the
+  keys and their limits.
 
 ## 0.3.0 — 2026-10-23
 

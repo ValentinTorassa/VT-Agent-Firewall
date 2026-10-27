@@ -28,7 +28,7 @@ Two recording modes, chosen on the hook:
   named or reached a protected path the hook stops asking for it (the trace
   carries that taint from one hook call to the next).
 
-The proposal only adds grants whose effect the firewall itself can bound:
+The proposal allows only what the firewall itself can bound:
 
 - a writable directory: the first directory under the sandbox root that the
   agent asked to write in, never the root itself or a hidden directory; the
@@ -36,14 +36,18 @@ The proposal only adds grants whose effect the firewall itself can bound:
 - a shell binary with an argument grammar (argv.py): it only reads, and every
   file it may open is checked.
 
-Everything else the agent needed (interpreters, network clients, binaries that
-write, MCP tools, writes in the root or in a hidden directory) is listed for a
-human decision with how often it was seen. Nothing a rule refuses for safety is
-relaxed: protected paths, the sandbox, network, forbidden arguments and API
-decisions are copied unchanged, and the proposal is replayed against every
-observation to check it. What a session attempted after it named or reached a
-protected path is not used as evidence: that session may be following an
-injection. Neither is an ask without a `ran` record: the human may have said no.
+A binary without a grammar (an interpreter, a network client, a binary that
+writes) is proposed for `shell_ask`: each call becomes a human's decision,
+never an allow. Allowing it without asking is listed for a human decision, as
+the exact commands the session ran (`shell_exact`), and so are the network
+origins it fetched (`network.allow`), MCP tools, and writes in the root or in a
+hidden directory, each with how often it was seen. Nothing a rule refuses for
+safety is relaxed: protected paths, the sandbox, network, forbidden arguments
+and API decisions are copied unchanged, and the proposal is replayed against
+every observation to check it. What a session attempted after it named or
+reached a protected path is not used as evidence: that session may be
+following an injection. Neither is an ask without a `ran` record: the human
+may have said no.
 """
 
 from __future__ import annotations
@@ -61,6 +65,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import argv as argv_grammar
+from . import network
 from .audit import AuditLogger, AuditUnavailable, fcntl
 from .config import Config
 from .models import ActionRequest, Decision, PolicyDecision
@@ -111,7 +116,14 @@ UNCHANGED_WHY = {
     "sh-args": "options outside the binary's grammar, or forbidden",
     "sh-syntax": "a host shell would expand the line; no policy allows that, the "
                  "agent has to send simple commands",
-    "net-deny-all": "the policy has no network allow rule: network stays denied",
+    "net-deny-all": "network.allow only covers GET and HEAD without a body to a URL "
+                    "it can read unambiguously: this request is none of those",
+    "net-allowlist": "network.allow only covers GET and HEAD without a body to a URL "
+                     "it can read unambiguously: this request is none of those",
+    "taint-session": "the request names a protected path",
+    "sh-allowlist": "the first word is not a program a policy can name (VAR=value, "
+                    "whitespace or a control character): the agent has to send the "
+                    "command without it",
     "unknown-tool": "a tool the firewall has no policy for",
     "mcp-protected-path": "an MCP argument names a protected path",
     "mcp-sandbox": "an MCP argument leaves the sandbox",
@@ -291,6 +303,98 @@ def ask_instead_of_block(config: Config):
             risk="high", rules_matched=[*decision.rules_matched, "learn-ask"],
             normalized=would.normalized)
     return relax
+
+
+def _with(config: Config, **changes) -> Config:
+    alt = copy.copy(config)
+    for name, value in changes.items():
+        setattr(alt, name, value)
+    return alt
+
+
+def _decide_with(config: Config, request: ActionRequest) -> PolicyDecision:
+    """`request` against `config`; naming or reaching a protected path blocks."""
+    state = SessionState()
+    would = PolicyEngine(config).evaluate(request, state)
+    if state.tainted and would.decision != Decision.BLOCK:
+        would.decision = Decision.BLOCK
+    return would
+
+
+def exact_candidate(config: Config, decision: PolicyDecision):
+    """(the shell_exact entry for this shell request, its decision with that
+    entry), or None when no entry can name it (a VAR=value word first). A
+    program spelled with a path is written as the file it resolves to."""
+    n = decision.normalized
+    binary, args, cwd = n.get("binary"), n.get("args"), n.get("cwd")
+    if not (isinstance(binary, str) and isinstance(args, list)
+            and isinstance(cwd, str)):
+        return None
+    program = binary
+    if "/" in binary:
+        resolved = Path(os.path.realpath(Path(cwd) / binary))
+        try:
+            program = resolved.relative_to(config.base_dir).as_posix()
+        except ValueError:
+            program = str(resolved)
+    entry = [program, *map(str, args)]
+    try:
+        exact = Config.exact_entry(config.base_dir, entry)
+    except ValueError:
+        return None
+    alt = _with(config, shell_exact=[*config.shell_exact, exact])
+    return entry, _decide_with(alt, decision.request)
+
+
+def can_ask(binary: str) -> bool:
+    """Can this program go on shell_ask (a bare name, no path, no VAR=value)?"""
+    try:
+        Config._programs([binary], "shell_ask")
+    except ValueError:
+        return False
+    return True
+
+
+def network_candidate(config: Config, decision: PolicyDecision):
+    """(the origin of this request, its decision with that origin on
+    network.allow), or None when the allowlist could never match the URL."""
+    target = network.origin_of(decision.normalized.get("url"))
+    if target is None:
+        return None
+    entry = network.parse_entry(target.origin())
+    alt = _with(config, network_mode="allowlist",
+                network_allow=[*config.network_allow, entry])
+    return target, _decide_with(alt, decision.request)
+
+
+def _ask_why(binary: str) -> str:
+    return "; ".join(risk_labels(binary) + [
+        "no argument grammar: asked about call by call, never allowed (still "
+        "denied where nobody can answer, as in Codex)"])
+
+
+def _exact_why(binary: str) -> str:
+    why = risk_labels(binary) + [
+        "this exact argv runs without asking: the firewall checks the argv, not "
+        "what the program does"]
+    if "/" in binary:
+        why.append("a program spelled with a path cannot go on shell_ask, so this "
+                   "is the only grant for it")
+    return "; ".join(why)
+
+
+def _network_why(target: network.Target, config: Config) -> str:
+    why = []
+    if network.is_local(target):
+        why.append("the machine itself or its network (an IP address, localhost or "
+                   "a single-label name)")
+    if target.scheme in ("http", "ws"):
+        why.append("cleartext")
+    why.append("GET and HEAD to this origin, any path, without asking: data can "
+               "still leave in the URL")
+    if config.network_mode != "allowlist":
+        why.append('also set network.mode to "allowlist"')
+    return "; ".join(why)
 
 
 # -- reading traces -----------------------------------------------------------------
@@ -516,9 +620,13 @@ def propose(policy_path: str | Path, trace_paths, base_dir: str | Path | None = 
     tainted_by: dict[str, str] = {}
     unconfirmed = 0                  # asks no `ran` record confirms
     used_bins: set[str] = set()
+    used_asks: set[str] = set()
+    used_exact: set[tuple] = set()
+    used_net: set[str] = set()
     used_dirs: set[Path] = set()
     new_dirs: set[Path] = set()
     new_bins: set[str] = set()
+    new_asks: set[str] = set()
     befores: list[Replayed] = []
     evidence: list[bool] = []        # may this observation support a grant?
     drifted = 0
@@ -557,6 +665,16 @@ def propose(policy_path: str | Path, trace_paths, base_dir: str | Path | None = 
         if before.decision == "allow":
             if before.rule_id == "sh-ok":
                 used_bins.add(d.normalized["binary"])
+            elif before.rule_id == "sh-exact":
+                n = d.normalized
+                hit = config.exact_command([n["binary"], *n["args"]], Path(n["cwd"]))
+                if hit is not None:
+                    used_exact.add(hit.argv)
+            elif before.rule_id == "net-ok":
+                hit, _ = network.match(config.network_allow, d.normalized["url"],
+                                       d.normalized["method"], None)
+                if hit is not None:
+                    used_net.add(hit.text)
             elif before.rule_id == "fs-write-ok":
                 path = Path(d.normalized["path"])
                 used_dirs.update(w for w in config.writable_dirs
@@ -575,6 +693,60 @@ def propose(policy_path: str | Path, trace_paths, base_dir: str | Path | None = 
                 group("add", "writable_dirs", show(target), why).add(obs, example)
             continue
 
+        if before.rule_id == "sh-ask" and d is not None:
+            # Already asked about. The one thing left to propose is allowing the
+            # exact command without asking, and that is a human's decision.
+            used_asks.add(d.normalized["binary"])
+            candidate = exact_candidate(config, d)
+            if candidate is not None and candidate[1].decision != Decision.BLOCK:
+                if untrusted:
+                    group("untrusted", "shell_exact", example, untrusted).add(obs, example)
+                else:
+                    group("decide", "shell_exact", json.dumps(candidate[0]),
+                          _exact_why(d.normalized["binary"])).add(obs, example)
+            continue
+
+        if before.rule_id == "sh-allowlist" and d is not None \
+                and not argv_grammar.has_grammar(d.normalized["binary"]):
+            # No grammar, so never the allowlist: ask about the binary, and list
+            # its exact commands for a human to allow.
+            binary = d.normalized["binary"]
+            candidate = exact_candidate(config, d)
+            if candidate is None:
+                group("unchanged", "sh-allowlist", "sh-allowlist",
+                      UNCHANGED_WHY["sh-allowlist"]).add(obs, example)
+                continue
+            entry, would = candidate
+            if would.decision == Decision.BLOCK:
+                rule = would.rule_id
+                group("unchanged", rule, rule,
+                      f"{UNCHANGED_WHY.get(rule, 'a refusal learning does not relax')} "
+                      f"(even with the missing sh-allowlist grant)").add(obs, example)
+                continue
+            if untrusted:
+                group("untrusted", "shell_ask" if can_ask(binary) else "shell_exact",
+                      example, untrusted).add(obs, example)
+                continue
+            if can_ask(binary):
+                new_asks.add(binary)
+                group("add", "shell_ask", binary, _ask_why(binary)).add(obs, example)
+            group("decide", "shell_exact", json.dumps(entry),
+                  _exact_why(binary)).add(obs, example)
+            continue
+
+        if before.rule_id in ("net-deny-all", "net-allowlist") and d is not None:
+            candidate = network_candidate(config, d)
+            if candidate is None or candidate[1].decision == Decision.BLOCK:
+                rule = before.rule_id
+                group("unchanged", rule, rule, UNCHANGED_WHY[rule]).add(obs, example)
+            elif untrusted:
+                group("untrusted", "network.allow", example, untrusted).add(obs, example)
+            else:
+                target = candidate[0]
+                group("decide", "network.allow", target.origin(),
+                      _network_why(target, config)).add(obs, example)
+            continue
+
         if before.rule_id in LIFTABLE and d is not None:
             would = would_decide(config, d)
             if would is None or would.decision == Decision.BLOCK:
@@ -589,15 +761,10 @@ def propose(policy_path: str | Path, trace_paths, base_dir: str | Path | None = 
                    else f"{d.normalized['server']}/{d.normalized['tool']}")
             if untrusted:
                 group("untrusted", field_, example, untrusted).add(obs, example)
-            elif field_ == "shell_allowlist" and argv_grammar.has_grammar(key):
+            elif field_ == "shell_allowlist":
                 new_bins.add(key)
                 group("add", field_, key, "has an argument grammar: it only reads, and "
                       "every file it may open is checked").add(obs, example)
-            elif field_ == "shell_allowlist":
-                labels = risk_labels(key)
-                why = "; ".join(labels + ["no argument grammar, so the firewall cannot "
-                                          "tell what it opens, writes or runs"])
-                group("decide", field_, key, why).add(obs, example)
             else:
                 group("decide", field_, key, "the firewall checks an MCP tool's path "
                       "arguments, not what the tool does: registering it is a decision "
@@ -614,19 +781,42 @@ def propose(policy_path: str | Path, trace_paths, base_dir: str | Path | None = 
                                      *sorted(show(p) for p in new_dirs)]
     if new_bins:
         proposed["shell_allowlist"] = [*raw.get("shell_allowlist", []), *sorted(new_bins)]
+    if new_asks:
+        proposed["shell_ask"] = [*raw.get("shell_ask", []), *sorted(new_asks)]
 
     unused_bins = [b for b in raw.get("shell_allowlist", []) if b not in used_bins]
     unused_dirs = [e for e in raw.get("writable_dirs", [])
                    if Config._abs(config.base_dir, e) not in used_dirs]
+    unused_asks = [b for b in raw.get("shell_ask", []) if b not in used_asks]
+    unused_exact = [e for e in raw.get("shell_exact", []) if tuple(e) not in used_exact]
+    raw_net = raw.get("network", {})
+    unused_net = [e for e in (raw_net.get("allow") or []) if e not in used_net] \
+        if config.network_mode == "allowlist" else []
     for b in unused_bins:
         group("unused", "shell_allowlist", b, "allowlisted, never used")
     for e in unused_dirs:
         group("unused", "writable_dirs", e, "writable, never written")
+    for b in unused_asks:
+        group("unused", "shell_ask", b, "asked about, never seen")
+    for e in unused_exact:
+        group("unused", "shell_exact", json.dumps(e), "allowed exactly, never run")
+    for e in unused_net:
+        group("unused", "network.allow", e, "allowed, never fetched")
     if drop_unused:
         proposed["shell_allowlist"] = [b for b in proposed["shell_allowlist"]
                                        if b not in unused_bins]
         proposed["writable_dirs"] = [e for e in proposed["writable_dirs"]
                                      if e not in unused_dirs]
+        if unused_asks:
+            proposed["shell_ask"] = [b for b in proposed["shell_ask"]
+                                     if b not in unused_asks]
+        if unused_exact:
+            proposed["shell_exact"] = [e for e in proposed["shell_exact"]
+                                       if e not in unused_exact]
+        if unused_net:
+            proposed["network"] = {**proposed["network"],
+                                   "allow": [e for e in proposed["network"]["allow"]
+                                             if e not in unused_net]}
 
     # Check the proposal against every observation before anyone sees it: the
     # only decisions allowed to get looser are the grants listed above.
@@ -634,6 +824,7 @@ def propose(policy_path: str | Path, trace_paths, base_dir: str | Path | None = 
     proposed_config.protected = set(config.protected)
     after_counts: Counter = Counter()
     unlearned_allowed: list[str] = []
+    unlearned_asked: list[str] = []
     for obs, before, usable in zip(observations, befores, evidence):
         after = replay(proposed_config, obs)
         after_counts[after.decision] += 1
@@ -642,6 +833,8 @@ def propose(policy_path: str | Path, trace_paths, base_dir: str | Path | None = 
         d = after.policy
         granted = d is not None and (
             (before.rule_id == "sh-allowlist" and d.normalized.get("binary") in new_bins)
+            or (before.rule_id == "sh-allowlist" and after.rule_id == "sh-ask"
+                and d.normalized.get("binary") in new_asks)
             or (before.rule_id == "fs-write-scope"
                 and any(t == Path(d.normalized["path"])
                         or t in Path(d.normalized["path"]).parents for t in new_dirs)))
@@ -649,8 +842,9 @@ def propose(policy_path: str | Path, trace_paths, base_dir: str | Path | None = 
             raise ProposalError(f"{obs.where}: the proposal would turn {before.decision} "
                                 f"({before.rule_id}) into {after.decision} "
                                 f"({after.rule_id}) for {describe(obs)}; not proposing")
-        if not usable and describe(obs) not in unlearned_allowed:
-            unlearned_allowed.append(describe(obs))
+        unlearned = unlearned_allowed if after.decision == "allow" else unlearned_asked
+        if not usable and describe(obs) not in unlearned:
+            unlearned.append(describe(obs))
 
     notes = []
     if unconfirmed and not any(obs.ran for obs in observations):
@@ -671,6 +865,12 @@ def propose(policy_path: str | Path, trace_paths, base_dir: str | Path | None = 
                      f"asked and not confirmed as run, or after the session went for a "
                      f"protected path): {shown}. Check that each grant is what you "
                      f"want.")
+    if unlearned_asked:
+        shown = "; ".join(unlearned_asked[:3])
+        notes.append(f"the proposed shell_ask entries would also ask about "
+                     f"{len(unlearned_asked)} action(s) that were not learned from "
+                     f"(refused at approval, asked and not confirmed as run, or after "
+                     f"the session went for a protected path): {shown}.")
     if drifted:
         notes.append(f"{drifted} observation(s) decide differently now than when they "
                      f"were recorded (the policy or the files changed).")
@@ -757,7 +957,8 @@ def render(proposal: Proposal, policy: str, out: str | None,
             lines.append(f"  {mark} {g.policy_key:<16} {label:<28} "
                          f"{times}, {sessions}".rstrip())
             lines.append(f"        {g.why}")
-            lines.append(f"        e.g. {'; '.join(g.examples)}")
+            if g.policy_key != "shell_exact":   # the entry is the example
+                lines.append(f"        e.g. {'; '.join(g.examples)}")
     b, a = proposal.before, proposal.after
     lines += ["", "Replayed against the proposal: " + ", ".join(
         f"{name} {b.get(key, 0)} -> {a.get(key, 0)}"
