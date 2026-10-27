@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- **A param of the wrong type is refused, never raised** (#12). Each tool's
+  params are type-checked before any rule runs: `path`, `cwd`, `content`,
+  `command`, `command_line`, `url`, `method`, `body`, `server`, `tool`, `uri`,
+  `audience` and `operation` must be strings when present, `args` a list of
+  strings or numbers, `via_shell` a boolean, and MCP and API `arguments` JSON
+  data. Anything else is `parse-error`. Before, a `url` of `123` raised
+  `AttributeError`, so the caller had to fail closed on its own; `args` as a
+  dict ran its keys as argv; `via_shell: 0` skipped the shell-syntax check, and
+  a non-string `content` was allowed and then failed in the executor.
+  Behaviour change: `{"method": null}` or `["GET"]` is `parse-error`, not
+  `net-allowlist`, and `cwd: null` is refused instead of meaning the sandbox root.
+- `PolicyEngine.evaluate` never raises: any other failure while evaluating (a
+  nesting too deep to walk, a cycle) is a `parse-error` refusal too.
+- A request whose params JSON cannot encode (bytes, a non-string key, a cycle)
+  no longer breaks the audit store and turns the gateway `fail-closed` until
+  restart: the record is written with those values replaced by their type (and
+  length, for bytes), never their content.
+- Corpus: three cases with wrong-typed params for every tool.
+
 - **Learning mode counts an ask only after your yes** (#4). Registered for
   `PostToolUse` as well, `vt-agent-firewall-hook --learn` appends a `ran` record
   (session, `tool_use_id`, tool name; never the tool's output) for each call the
