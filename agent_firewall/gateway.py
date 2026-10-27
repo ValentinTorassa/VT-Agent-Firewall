@@ -32,7 +32,7 @@ import uuid
 from pathlib import Path
 
 from .approval import TerminalApprover
-from .audit import AuditLogger, AuditUnavailable
+from .audit import AuditLogger, AuditUnavailable, plain
 from .config import Config
 from .executor import Executor
 from .models import ActionRequest, Decision, PolicyDecision
@@ -248,7 +248,12 @@ class Gateway:
         gets the real ones; only the record is minimized."""
         if self.audit_verbose or not isinstance(params, dict):
             return params
-        view = copy.deepcopy(params)
+        try:
+            view = copy.deepcopy(params)
+        except Exception:
+            # Too deep or too odd to copy: a malformed request. Keep only what
+            # the audit can write, by type.
+            return plain(params)
         if tool == "fs.write" and isinstance(view.get("content"), str):
             view["content"] = _digest(view["content"])
         if tool == "net.request" and isinstance(view.get("body"), str):

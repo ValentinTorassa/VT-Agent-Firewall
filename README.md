@@ -73,7 +73,7 @@ All data in `demo_workspace/` is synthetic bait.
 | `mcp-resources-denied` | block MCP resource reads unless the policy enables them for that server |
 | `approval-denied` | block when the human says no, times out, or stdin is not interactive |
 | `fail-closed` | block everything when the audit store is unavailable |
-| `unknown-tool` / `parse-error` | block a tool with no policy and a request that cannot be parsed (default-deny) |
+| `unknown-tool` / `parse-error` | block a tool with no policy and a request that cannot be parsed or has a param of the wrong type (default-deny) |
 | `hook-unsupported` | block a host tool call the hook cannot check (a Codex patch aimed at another environment) |
 | `learn-ask` | learning mode `ask` only: require approval for a call refused only by `sh-allowlist` or `mcp-unknown-tool` that nothing else refuses |
 | `api-ok` / `api-approval` / `api-blocked` | per-operation decision for `api.call`, taken before any credential exists |
