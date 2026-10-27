@@ -198,20 +198,17 @@ class PolicyEngine:
                 return self._decide(req, Decision.BLOCK, "sh-paths",
                                     f"argv escapes sandbox: {resolved}", "high",
                                     normalized)
-        if grant != "sh-ok" and not argv_grammar.has_grammar(binary):
-            # Without a grammar nothing says which tokens are files, and the
-            # fallback misses `@file` (curl -d @.env), `--opt=@file` and an
-            # attached short-option value (-d@.env). A grant that lets an
-            # unbounded binary run, or be asked about, looks in those too.
-            for token in args:
-                for spelled in self._file_spellings(token):
-                    resolved = self._resolve_path(spelled, cwd)
-                    if self.cfg.is_protected(resolved):
-                        session.tainted = True
-                        return self._decide(req, Decision.BLOCK, "sh-paths",
-                                            f"argv names protected path {resolved} "
-                                            f"({token!r})", "high", normalized,
-                                            matched=["sh-paths", "fs-protected"])
+        # Without a grammar nothing says which words are files, so any word that
+        # may name one (name@.env, f=@.env) must not name a protected path,
+        # whatever the grant: the allowlist, shell_exact or shell_ask.
+        for spelled in parsed.names:
+            resolved = self._resolve_path(spelled, cwd)
+            if self.cfg.is_protected(resolved):
+                session.tainted = True
+                return self._decide(req, Decision.BLOCK, "sh-paths",
+                                    f"argv names protected path {resolved} "
+                                    f"({spelled!r})", "high", normalized,
+                                    matched=["sh-paths", "fs-protected"])
         forbidden = sorted(self.cfg.shell_forbidden_args.get(binary, set())
                            .intersection(args))
         if parsed.errors or forbidden:
@@ -320,20 +317,11 @@ class PolicyEngine:
                     stack.append((real, depth + 1))
         return None
 
-    @staticmethod
-    def _file_spellings(token: str) -> set[str]:
-        """Every way `token` may name a file for a binary without a grammar."""
-        found = {token, token.partition("=")[2]}
-        if token.startswith("-") and not token.startswith("--"):
-            found.add(token[2:])
-        found |= {f[1:] for f in found if f.startswith("@")}
-        return {f for f in found if f and "\0" not in f}
-
     def _taint_if_named(self, tokens: list[str], cwd: Path, session) -> None:
+        # The fallback's spellings for every binary: naming a protected path
+        # through `@.env` taints like naming it as `.env`, allowed or not.
         for token in tokens:
-            for spelled in (token, token.partition("=")[2]):
-                if not spelled or "\0" in spelled:
-                    continue
+            for spelled in argv_grammar.spellings(token):
                 try:
                     if self.cfg.is_protected(self._resolve_path(spelled, cwd)):
                         session.tainted = True

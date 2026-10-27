@@ -385,7 +385,8 @@ diff -u policies/default.json logs/learning/proposed-policy.json
 `sort`, `python3` and `git` will ask from now on instead of being denied; the
 web page and the exact commands wait for your decision. `curl -d @.env` is under
 Unchanged rather than "Not learned from": no grant could ever allow it, since
-`shell_ask` and `shell_exact` look inside `@file` arguments too.
+the path checks look inside `@file` arguments for every binary without a
+grammar. In `--learn-mode ask` it stays a denial for the same reason.
 
 The `scratch/` write was asked like the `reports/` ones and is not proposed
 because you said no. The injected session's canary write is the same kind of

