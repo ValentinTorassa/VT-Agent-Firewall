@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from test_hook import HookTestBase  # noqa: E402
 
 from agent_firewall import ActionRequest, Decision, Gateway, hook, learn  # noqa: E402
+from agent_firewall.mcp_proxy import Learner  # noqa: E402
 from scripts import run_corpus, run_learning_demo  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
@@ -583,6 +584,104 @@ class TestProposal(LearnTestBase):
                 self.trace.write_text(text)
                 with self.assertRaises(learn.TraceError):
                     self.propose()
+
+
+class TestNarrowingCoverage(LearnTestBase):
+    """`--drop-unused` narrows only what the traces could have seen used: the
+    hook's surfaces from hook traces, an MCP server's tools from a proxy trace
+    of that server (issue #9)."""
+
+    def setUp(self):
+        super().setUp()
+        self.proxy_trace = self.tmp / "state" / "proxy-trace.jsonl"
+        self.wide = {**self.policy,
+                     "shell_ask": ["python3"],
+                     "shell_exact": [["python3", "--version"]],
+                     "network": {"mode": "allowlist", "allow": ["https://example.com"]},
+                     "mcp_registry": {"demo": ["ping", "echo"],
+                                      "other": ["read_file", "write_file"]}}
+        self.wide_path = self.tmp / "wide.json"
+        self.wide_path.write_text(json.dumps(self.wide))
+
+    def record_proxy(self, server, *calls):
+        """One MCP proxy session through the real Learner: (tool, arguments)."""
+        gateway = Gateway(self.wide_path, self.tmp / "logs" / "proxy-audit.jsonl",
+                          base_dir=self.tmp)
+        learner = Learner(gateway, self.proxy_trace, self.wide_path, server)
+        try:
+            for tool, arguments in calls:
+                gateway.handle_with_result(
+                    ActionRequest(actor="mcp-client", tool="mcp.call",
+                                  params={"server": server, "tool": tool,
+                                          "arguments": arguments}),
+                    observe=learner.observer("tools/call"))
+        finally:
+            learner.close()
+            gateway.audit.close()
+
+    def propose_from(self, *traces, drop_unused=True):
+        return learn.propose(self.wide_path, list(traces), base_dir=self.tmp,
+                             drop_unused=drop_unused)
+
+    def test_the_proxy_host_is_the_one_the_proposal_looks_for(self):
+        self.assertEqual(Learner.HOST, learn.PROXY_HOST)
+
+    def test_a_proxy_only_trace_keeps_every_binary_and_directory(self):
+        self.record_proxy("demo", ("ping", {}))
+        proposal = self.propose_from(self.proxy_trace)
+        for key in ("shell_allowlist", "writable_dirs", "shell_ask", "shell_exact",
+                    "network"):
+            self.assertEqual(proposal.policy[key], self.wide[key], key)
+        self.assertEqual({g.policy_key for g in proposal.section("unused")},
+                         {"mcp_registry"})
+        [note] = [n for n in proposal.notes if "no hook observations" in n]
+        self.assertIn("11 grant(s)", note)   # 7 binaries, a directory, 3 entries
+        report = learn.render(proposal, str(self.wide_path), None, drop_unused=True)
+        self.assertIn("Note: these traces hold no hook observations", report)
+
+    def test_a_proxy_trace_narrows_only_the_server_it_covers(self):
+        self.record_proxy("demo", ("ping", {}), ("missing", {}))
+        kept = self.propose_from(self.proxy_trace, drop_unused=False)
+        self.assertEqual(self.keys(kept, "unused"), {("mcp_registry", "demo/echo")})
+        self.assertEqual(kept.policy["mcp_registry"], self.wide["mcp_registry"])
+        dropped = self.propose_from(self.proxy_trace)
+        self.assertEqual(dropped.policy["mcp_registry"],
+                         {"demo": ["ping"], "other": ["read_file", "write_file"]})
+        report = learn.render(dropped, str(self.wide_path), None, drop_unused=True)
+        self.assertRegex(report, r"- mcp_registry +demo/echo\n")
+
+    def test_a_tool_blocked_on_its_arguments_is_not_a_use(self):
+        self.record_proxy("demo", ("ping", {}), ("echo", {"path": "../.env"}))
+        proposal = self.propose_from(self.proxy_trace)
+        self.assertEqual(proposal.policy["mcp_registry"]["demo"], ["ping"])
+
+    def test_hook_and_proxy_traces_narrow_both_surfaces(self):
+        self.call("Bash", {"command": "ls normal"}, policy=self.wide_path)
+        self.record_proxy("demo", ("echo", {"text": "hi"}))
+        proposal = self.propose_from(self.trace, self.proxy_trace)
+        self.assertEqual(proposal.policy["shell_allowlist"], ["ls"])
+        self.assertEqual(proposal.policy["writable_dirs"], [])
+        self.assertEqual(proposal.policy["shell_ask"], [])
+        self.assertEqual(proposal.policy["shell_exact"], [])
+        self.assertEqual(proposal.policy["network"]["allow"], [])
+        self.assertEqual(proposal.policy["mcp_registry"],
+                         {"demo": ["echo"], "other": ["read_file", "write_file"]})
+        self.assertFalse([n for n in proposal.notes if "no hook observations" in n])
+
+    def test_a_proxy_trace_that_names_no_server_covers_nothing(self):
+        self.call("Bash", {"command": "ls normal"}, policy=self.wide_path)
+        self.record_proxy("demo", ("ping", "not an object"))     # parse-error
+        [obs] = [json.loads(line) for line in self.proxy_trace.read_text().splitlines()]
+        self.assertEqual((obs["rule_id"], obs["normalized"]), ("parse-error", {}))
+        proposal = self.propose_from(self.trace, self.proxy_trace)
+        self.assertEqual(proposal.policy["mcp_registry"], self.wide["mcp_registry"])
+        self.assertEqual(proposal.policy["shell_allowlist"], ["ls"])
+
+    def test_mcp_calls_seen_by_the_hook_alone_narrow_no_tools(self):
+        self.call("mcp__demo__ping", {}, policy=self.wide_path)
+        proposal = self.propose_from(self.trace)
+        self.assertEqual(proposal.policy["mcp_registry"], self.wide["mcp_registry"])
+        self.assertNotIn("mcp_registry", {g.policy_key for g in proposal.section("unused")})
 
 
 class TestCorpus(unittest.TestCase):

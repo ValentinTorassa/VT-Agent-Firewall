@@ -50,6 +50,16 @@
   or a registered write reached the server). With `--learn`, each observation's
   `self_protected` lists both next to the trace, so the proposal keeps them
   protected when it replays.
+- **`--drop-unused` narrows only what the traces cover** (#9). The hook's
+  surfaces (allowlisted binaries, writable directories, `shell_ask`,
+  `shell_exact`, `network.allow`) are listed as unused and dropped only when a
+  trace includes hook observations: with traces from the MCP proxy alone, which
+  never sees a shell command, a write or a fetch, they are kept and the report
+  says how many. Before, such a trace made every binary and directory look
+  unused, and `--drop-unused` removed them all.
+- `vt-agent-firewall-propose` now lists the registered tools of each MCP server
+  a proxy trace covers that no allowed `tools/call` used, and `--drop-unused`
+  removes them. Servers no proxy trace names are left alone, as before.
 - **Learning mode counts an ask only after your yes** (#4). Registered for
   `PostToolUse` as well, `vt-agent-firewall-hook --learn` appends a `ran` record
   (session, `tool_use_id`, tool name; never the tool's output) for each call the
