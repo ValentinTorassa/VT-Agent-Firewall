@@ -78,6 +78,9 @@ from .session import SessionState
 TRACE_VERSION = 2
 READABLE_VERSIONS = (1, 2)
 MODES = ("enforce", "ask")
+# The `host` of the MCP proxy's observations (mcp_proxy.Learner.HOST). Any other
+# host is the agent hook.
+PROXY_HOST = "mcp-proxy"
 # The only refusals a policy edit could lift, so the only ones `ask` mode asks
 # about. Everything else is refused for a reason no observation can change.
 LIFTABLE = frozenset({"sh-allowlist", "mcp-unknown-tool"})
@@ -419,6 +422,7 @@ class Observation:
     policy_sha256: str | None
     self_protected: list[str]
     ran: bool = False          # a `ran` record (PostToolUse) matches it
+    host: str | None = None    # who recorded it: the hook's host or PROXY_HOST
 
     @property
     def asked(self) -> bool:
@@ -482,7 +486,8 @@ def read_traces(paths, sandbox_root: Path) -> list[Observation]:
                 else None,
                 policy_sha256=raw.get("policy_sha256"),
                 self_protected=[p for p in raw.get("self_protected", [])
-                                if isinstance(p, str)]))
+                                if isinstance(p, str)],
+                host=raw.get("host") if isinstance(raw.get("host"), str) else None))
             keys.append(_ran_key(raw))
     for obs, key in zip(observations, keys):
         obs.ran = key is not None and key in ran
@@ -624,6 +629,7 @@ def propose(policy_path: str | Path, trace_paths, base_dir: str | Path | None = 
     used_exact: set[tuple] = set()
     used_net: set[str] = set()
     used_dirs: set[Path] = set()
+    used_tools: set[tuple[str, str]] = set()
     new_dirs: set[Path] = set()
     new_bins: set[str] = set()
     new_asks: set[str] = set()
@@ -679,6 +685,8 @@ def propose(policy_path: str | Path, trace_paths, base_dir: str | Path | None = 
                 path = Path(d.normalized["path"])
                 used_dirs.update(w for w in config.writable_dirs
                                  if w == path or w in path.parents)
+            elif before.rule_id == "mcp-ok":
+                used_tools.add((d.normalized["server"], d.normalized["tool"]))
             continue
 
         if before.rule_id == "fs-write-scope" and d is not None:
@@ -784,6 +792,16 @@ def propose(policy_path: str | Path, trace_paths, base_dir: str | Path | None = 
     if new_asks:
         proposed["shell_ask"] = [*raw.get("shell_ask", []), *sorted(new_asks)]
 
+    # A grant is unused only where the traces could have seen it used. The hook
+    # sees shell commands, file writes and fetches; the MCP proxy sees every call
+    # to its one server, and never a shell command or a write. A grant on a
+    # surface no trace covers is unseen, not unused.
+    hook_seen = any(obs.host != PROXY_HOST for obs in observations)
+    # A proxy trace covers the server its observations name. One with no call
+    # that names a server covers nothing, so it narrows nothing.
+    proxy_servers = {obs.normalized["server"] for obs in observations
+                     if obs.host == PROXY_HOST
+                     and isinstance(obs.normalized.get("server"), str)}
     unused_bins = [b for b in raw.get("shell_allowlist", []) if b not in used_bins]
     unused_dirs = [e for e in raw.get("writable_dirs", [])
                    if Config._abs(config.base_dir, e) not in used_dirs]
@@ -792,6 +810,14 @@ def propose(policy_path: str | Path, trace_paths, base_dir: str | Path | None = 
     raw_net = raw.get("network", {})
     unused_net = [e for e in (raw_net.get("allow") or []) if e not in used_net] \
         if config.network_mode == "allowlist" else []
+    unseen = 0
+    if not hook_seen:
+        unseen = sum(map(len, (unused_bins, unused_dirs, unused_asks, unused_exact,
+                               unused_net)))
+        unused_bins, unused_dirs, unused_asks, unused_exact, unused_net = [], [], [], [], []
+    unused_tools = [(server, tool) for server in sorted(proxy_servers)
+                    for tool in raw.get("mcp_registry", {}).get(server, [])
+                    if (server, tool) not in used_tools]
     for b in unused_bins:
         group("unused", "shell_allowlist", b, "allowlisted, never used")
     for e in unused_dirs:
@@ -802,11 +828,16 @@ def propose(policy_path: str | Path, trace_paths, base_dir: str | Path | None = 
         group("unused", "shell_exact", json.dumps(e), "allowed exactly, never run")
     for e in unused_net:
         group("unused", "network.allow", e, "allowed, never fetched")
+    for server, tool in unused_tools:
+        group("unused", "mcp_registry", f"{server}/{tool}",
+              "registered, never used (the MCP proxy saw every call to this server)")
     if drop_unused:
-        proposed["shell_allowlist"] = [b for b in proposed["shell_allowlist"]
-                                       if b not in unused_bins]
-        proposed["writable_dirs"] = [e for e in proposed["writable_dirs"]
-                                     if e not in unused_dirs]
+        if unused_bins:
+            proposed["shell_allowlist"] = [b for b in proposed["shell_allowlist"]
+                                           if b not in unused_bins]
+        if unused_dirs:
+            proposed["writable_dirs"] = [e for e in proposed["writable_dirs"]
+                                         if e not in unused_dirs]
         if unused_asks:
             proposed["shell_ask"] = [b for b in proposed["shell_ask"]
                                      if b not in unused_asks]
@@ -817,6 +848,10 @@ def propose(policy_path: str | Path, trace_paths, base_dir: str | Path | None = 
             proposed["network"] = {**proposed["network"],
                                    "allow": [e for e in proposed["network"]["allow"]
                                              if e not in unused_net]}
+        if unused_tools:
+            proposed["mcp_registry"] = {
+                server: [t for t in tools if (server, t) not in unused_tools]
+                for server, tools in proposed["mcp_registry"].items()}
 
     # Check the proposal against every observation before anyone sees it: the
     # only decisions allowed to get looser are the grants listed above.
@@ -855,6 +890,13 @@ def propose(policy_path: str | Path, trace_paths, base_dir: str | Path | None = 
     elif unconfirmed:
         notes.append(f"{unconfirmed} ask(s) have no PostToolUse record: refused at the "
                      f"prompt, failed or interrupted. They are not learned from.")
+    if unseen:
+        notes.append(f"these traces hold no hook observations, only the MCP proxy's, "
+                     f"which never sees a shell command, a file write or a fetch. "
+                     f"{unseen} grant(s) in shell_allowlist, writable_dirs, shell_ask, "
+                     f"shell_exact and network.allow are not listed as unused, and "
+                     f"--drop-unused keeps them: record with the hook too to narrow "
+                     f"them.")
     if other_policy:
         notes.append(f"{other_policy} observation(s) were recorded under a different "
                      f"policy file; every decision here is recomputed against this one.")
@@ -990,8 +1032,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out", help="write the proposed policy to this file "
                                       "(never over --policy)")
     parser.add_argument("--drop-unused", action="store_true",
-                        help="also remove allowlisted binaries and writable "
-                             "directories that no observation used")
+                        help="also remove the grants no observation used, where the "
+                             "traces could have seen them: binaries, writable "
+                             "directories, shell_ask, shell_exact and network.allow "
+                             "entries when a trace is from the hook, and the MCP "
+                             "tools of each server a proxy trace covers")
     return parser
 
 

@@ -270,14 +270,23 @@ against the proposed policy. If any decision gets looser in a way that is not
 one of the listed grants, it stops with an error and writes nothing. The report
 ends with the before and after counts.
 
-**Narrowing.** Allowlisted binaries, writable directories, and `shell_ask`,
-`shell_exact` and `network.allow` entries that no observation used are listed as
-unused. `--drop-unused` removes them from the proposal. MCP
-tools are left alone: the hook only sees them when its matcher includes
-`mcp__.*`, so an unused-looking tool may be in use through the MCP proxy. The
-reverse holds for a trace from the proxy alone: it never sees a shell command or
-a file write, so every allowlisted binary and writable directory looks unused.
-Pass `--drop-unused` only with traces that cover the hook too.
+**Narrowing.** A grant no observation used is listed as unused, and
+`--drop-unused` removes it from the proposal, but only where the traces could
+have seen it used:
+
+- Allowlisted binaries, writable directories, and `shell_ask`, `shell_exact`
+  and `network.allow` entries, when at least one trace is from the hook. A
+  trace from the MCP proxy alone never sees a shell command, a file write or a
+  fetch, so with proxy traces only none of them is listed or dropped, and the
+  report says how many it kept.
+- The registered tools of each MCP server a proxy trace covers: the proxy sees
+  every call to its server. A server counts as covered when one of the proxy's
+  observations names it, so a proxy run with no well-formed call covers
+  nothing. A tool counts as used only when a call to it was allowed; one
+  refused on its arguments (`mcp-protected-path`) is not a use.
+- Tools of any other server are left alone: the hook only sees MCP calls when
+  its matcher includes `mcp__.*`, so a tool that looks unused in a hook trace
+  may be in use through the proxy.
 
 ## Walkthrough with `demo_workspace`
 
