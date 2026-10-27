@@ -73,7 +73,7 @@ All data in `demo_workspace/` is synthetic bait.
 | `mcp-resources-denied` | block MCP resource reads unless the policy enables them for that server |
 | `approval-denied` | block when the human says no, times out, or stdin is not interactive |
 | `fail-closed` | block everything when the audit store is unavailable |
-| `unknown-tool` / `parse-error` | block a tool with no policy and a request that cannot be parsed (default-deny) |
+| `unknown-tool` / `parse-error` | block a tool with no policy and a request that cannot be parsed or has a param of the wrong type (default-deny) |
 | `hook-unsupported` | block a host tool call the hook cannot check (a Codex patch aimed at another environment) |
 | `learn-ask` | learning mode `ask` only: require approval for a call refused only by `sh-allowlist` or `mcp-unknown-tool` that nothing else refuses |
 | `api-ok` / `api-approval` / `api-blocked` | per-operation decision for `api.call`, taken before any credential exists |
@@ -116,8 +116,8 @@ malformed entry is a policy that cannot load, so the hook denies everything.
   non-ASCII, and `..` (plain or encoded) under a path prefix. The executor does
   not follow redirects.
 
-None of them skips another check: paths (for these two shell grants also
-`@file`, `--opt=@file` and `-d@file`), the sandbox, forbidden options, recursive
+None of them skips another check: paths (for a binary without a grammar, also
+`@file`, `--opt=@file`, `-d@file` and `name@file`), the sandbox, forbidden options, recursive
 walks and `sh-syntax` come first, and a session that went for a protected path
 gets none of them (`taint-session`). What they cannot do: an exact command fixes
 the argv, not what the program runs (`python3 -m pytest` imports any test file
@@ -167,6 +167,9 @@ client launches the proxy as if it were the server; the proxy launches the real 
   outside the sandbox is blocked, not only a protected one;
 - `resources/read` goes through the policy and is denied unless the server is listed
   in `mcp_resources`;
+- the policy file and the audit log given on the command line are added to the
+  protected paths, after `realpath`, so a call cannot read or rewrite them
+  (`mcp-protected-path`);
 - only known MCP methods are relayed; JSON-RPC batches are rejected and a
   `tools/call` sent as a notification is dropped, so nothing reaches the server
   around the policy;
@@ -342,7 +345,8 @@ These are deliberate v0 boundaries, not hidden ones:
   examples.
   See [docs/LEARNING.md](docs/LEARNING.md#limits).
 - **The shell grammars follow GNU userland** (coreutils, grep, findutils). Binaries
-  added without a grammar get a conservative fallback. See the
+  added without a grammar get a conservative fallback: every word that may name a
+  file, curl's `@file` spellings included, is checked like a path. See the
   [threat model](docs/THREAT_MODEL.md#known-limitations) for the rest.
 - **Audit records are minimized:** written content is kept as a SHA-256 and a
   length, network bodies as a 64-character preview plus a digest. Pass

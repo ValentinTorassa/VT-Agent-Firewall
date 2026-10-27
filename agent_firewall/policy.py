@@ -23,7 +23,9 @@ Network: deny-all (`net-deny-all`) unless `network.mode` is `allowlist`, where
 GET/HEAD to a listed origin is allowed (`net-ok`) and the rest is refused
 (`net-allowlist`); see network.py. A tainted session gets no network.
 Fail-closed: malformed params, unknown tools, options outside a grammar, or
-no matching allow rule all produce BLOCK.
+no matching allow rule all produce BLOCK. A param of the wrong type (a `url`
+that is not a string, `args` that is not a list) is malformed: it is refused
+with `parse-error` before any rule runs, and `evaluate` never raises.
 """
 
 from __future__ import annotations
@@ -39,6 +41,76 @@ from . import shell_syntax
 from .config import Config
 from .models import ActionRequest, Decision, PolicyDecision
 from .session import SessionState
+
+# The params each tool reads, with the type each must have. Any other type is a
+# malformed request, refused before a handler sees it: an exception is not a
+# decision, and coercing the value (str(123), a dict's keys as argv) would
+# decide on something the caller did not write.
+REQUIRED_STRINGS = {
+    "fs.read": ("path",),
+    "fs.write": ("path",),
+    "net.request": ("url",),
+    "mcp.call": ("server", "tool"),
+    "mcp.resource": ("server", "uri"),
+    "api.call": ("audience", "operation"),
+}
+OPTIONAL_STRINGS = {
+    "fs.read": ("cwd",),
+    "fs.write": ("cwd", "content"),
+    "shell.run": ("cwd", "command", "command_line"),
+    "net.request": ("method", "body"),
+}
+
+
+def check_param_types(tool: str, params) -> None:
+    """Raise KeyError or TypeError when `params` is not what `tool` reads."""
+    if not isinstance(params, dict):
+        raise TypeError(f"params must be an object, not {type(params).__name__}")
+    for key in REQUIRED_STRINGS.get(tool, ()):
+        if key not in params:
+            raise KeyError(key)
+    for key in REQUIRED_STRINGS.get(tool, ()) + OPTIONAL_STRINGS.get(tool, ()):
+        if key in params and not isinstance(params[key], str):
+            raise TypeError(f"{key} must be a string, not "
+                            f"{type(params[key]).__name__}")
+    if tool == "shell.run":
+        if "command_line" not in params and "command" not in params:
+            raise KeyError("command")
+        args = params.get("args", [])
+        # Numbers are written as they are spelled (`head -n 5`); anything else
+        # has no single spelling as an argv word.
+        if not isinstance(args, (list, tuple)) or not all(
+                isinstance(a, (str, int)) and not isinstance(a, bool) for a in args):
+            raise TypeError("args must be a list of strings")
+        if not isinstance(params.get("via_shell", False), bool):
+            raise TypeError("via_shell must be true or false")
+    if tool in ("mcp.call", "api.call") and not _is_json(params.get("arguments", {})):
+        # Forwarded as JSON: what the policy inspects must be what is sent.
+        raise TypeError("arguments must be JSON data (string keys; strings, "
+                        "numbers, booleans, null, lists and objects)")
+
+
+def _is_json(value) -> bool:
+    """True when every value in `value` is plain JSON data. Iterative, so a deep
+    nesting is not a reason to raise here; a container met twice (shared, or a
+    cycle) is checked once, and a cycle is refused when the policy walks it."""
+    stack, seen = [value], set()
+    while stack:
+        item = stack.pop()
+        if item is None or isinstance(item, (str, int, float)):
+            continue
+        if not isinstance(item, (dict, list, tuple)):
+            return False
+        if id(item) in seen:
+            continue
+        seen.add(id(item))
+        if isinstance(item, dict):
+            if not all(isinstance(k, str) for k in item):
+                return False
+            stack.extend(item.values())
+        else:
+            stack.extend(item)
+    return True
 
 
 class PolicyEngine:
@@ -60,11 +132,18 @@ class PolicyEngine:
                                 f"no policy for tool '{req.tool}' (default-deny)",
                                 "medium", {})
         try:
+            check_param_types(req.tool, req.params)
             return handler(req, session)
         except (KeyError, TypeError, ValueError) as e:
             # Parser/normalizer failure: fail closed.
             return self._decide(req, Decision.BLOCK, "parse-error",
                                 f"malformed request: {e}", "medium", {})
+        except Exception as e:
+            # Anything else (a nesting too deep to walk, a bug) is still a
+            # refusal, never an exception the caller has to turn into one.
+            return self._decide(req, Decision.BLOCK, "parse-error",
+                                f"request could not be evaluated: "
+                                f"{type(e).__name__}: {e}", "medium", {})
 
     # -- helpers ----------------------------------------------------------
 
@@ -198,20 +277,17 @@ class PolicyEngine:
                 return self._decide(req, Decision.BLOCK, "sh-paths",
                                     f"argv escapes sandbox: {resolved}", "high",
                                     normalized)
-        if grant != "sh-ok" and not argv_grammar.has_grammar(binary):
-            # Without a grammar nothing says which tokens are files, and the
-            # fallback misses `@file` (curl -d @.env), `--opt=@file` and an
-            # attached short-option value (-d@.env). A grant that lets an
-            # unbounded binary run, or be asked about, looks in those too.
-            for token in args:
-                for spelled in self._file_spellings(token):
-                    resolved = self._resolve_path(spelled, cwd)
-                    if self.cfg.is_protected(resolved):
-                        session.tainted = True
-                        return self._decide(req, Decision.BLOCK, "sh-paths",
-                                            f"argv names protected path {resolved} "
-                                            f"({token!r})", "high", normalized,
-                                            matched=["sh-paths", "fs-protected"])
+        # Without a grammar nothing says which words are files, so any word that
+        # may name one (name@.env, f=@.env) must not name a protected path,
+        # whatever the grant: the allowlist, shell_exact or shell_ask.
+        for spelled in parsed.names:
+            resolved = self._resolve_path(spelled, cwd)
+            if self.cfg.is_protected(resolved):
+                session.tainted = True
+                return self._decide(req, Decision.BLOCK, "sh-paths",
+                                    f"argv names protected path {resolved} "
+                                    f"({spelled!r})", "high", normalized,
+                                    matched=["sh-paths", "fs-protected"])
         forbidden = sorted(self.cfg.shell_forbidden_args.get(binary, set())
                            .intersection(args))
         if parsed.errors or forbidden:
@@ -320,20 +396,11 @@ class PolicyEngine:
                     stack.append((real, depth + 1))
         return None
 
-    @staticmethod
-    def _file_spellings(token: str) -> set[str]:
-        """Every way `token` may name a file for a binary without a grammar."""
-        found = {token, token.partition("=")[2]}
-        if token.startswith("-") and not token.startswith("--"):
-            found.add(token[2:])
-        found |= {f[1:] for f in found if f.startswith("@")}
-        return {f for f in found if f and "\0" not in f}
-
     def _taint_if_named(self, tokens: list[str], cwd: Path, session) -> None:
+        # The fallback's spellings for every binary: naming a protected path
+        # through `@.env` taints like naming it as `.env`, allowed or not.
         for token in tokens:
-            for spelled in (token, token.partition("=")[2]):
-                if not spelled or "\0" in spelled:
-                    continue
+            for spelled in argv_grammar.spellings(token):
                 try:
                     if self.cfg.is_protected(self._resolve_path(spelled, cwd)):
                         session.tainted = True

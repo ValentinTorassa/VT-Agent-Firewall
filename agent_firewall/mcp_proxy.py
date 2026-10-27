@@ -12,6 +12,9 @@ the server; the proxy launches the real server and relays JSON-RPC over stdio.
 - `resources/read` goes through the gateway too and is denied unless the
   policy lists the server in `mcp_resources`; while denied, resource lists
   come back empty and subscriptions are refused.
+- The policy file and the audit log given on the command line join the
+  protected paths at startup, as in the agent hook: a call that names either
+  is refused (`mcp-protected-path`) before the server sees it.
 - Only known MCP methods are relayed (initialize, ping, prompts, completion,
   logging, notifications, and answers to the server's own requests; a policy
   can add more with `mcp_relay_methods`). Anything else is refused, and
@@ -155,6 +158,15 @@ class ServerConnection:
                 self.proc.kill()
 
 
+def protect_own_files(gateway: Gateway, *paths) -> list[Path]:
+    """Add the proxy's own files to the protected paths, resolved the way the
+    hook resolves its own (realpath: symlinks and relative paths), and return
+    them. A tool call that names one is refused (`mcp-protected-path`)."""
+    own = [Path(os.path.realpath(p)) for p in paths if p]
+    gateway.config.protected.update(own)
+    return own
+
+
 class Learner:
     """`--learn TRACE`: one observation per gated request, before it executes.
 
@@ -168,16 +180,17 @@ class Learner:
     HOST = "mcp-proxy"
 
     def __init__(self, gateway: Gateway, trace: str | Path, policy: str | Path,
-                 server_name: str):
+                 server_name: str, self_protected=()):
+        """`self_protected`: the proxy's other own files (`protect_own_files`),
+        recorded in each observation with the trace."""
         self.gateway = gateway
         self.session_id = f"mcp-{server_name}-{uuid.uuid4().hex[:12]}"
-        own = Path(os.path.realpath(trace))
-        gateway.config.protected.add(own)
+        own = protect_own_files(gateway, trace)
         self.error: str | None = None
         self.writer = None
         try:
             self.writer = learn.TraceWriter(trace, "enforce", gateway.config, policy,
-                                            self_protected=[own])
+                                            self_protected=[*self_protected, *own])
         except learn.TraceUnavailable as e:
             self._fail(str(e))
 
@@ -437,7 +450,11 @@ def main(argv: list[str] | None = None) -> int:
     approver = TtyApprover() if args.tty_approval else DenyApprover()
     gateway = Gateway(args.policy, args.audit, approver=approver,
                       base_dir=args.base_dir)
-    learner = (Learner(gateway, args.learn, args.policy, args.server_name)
+    # Self-protection, as in the hook: no tool call may read or rewrite the
+    # policy that judges the agent or the log that records it.
+    own = protect_own_files(gateway, args.policy, args.audit)
+    learner = (Learner(gateway, args.learn, args.policy, args.server_name,
+                       self_protected=own)
                if args.learn else None)
     log(f"proxying MCP server {args.server_name!r}: {' '.join(server_argv)}")
     McpProxy(gateway, args.server_name, server_argv, learner=learner).run()

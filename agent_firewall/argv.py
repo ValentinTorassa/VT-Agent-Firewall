@@ -7,8 +7,11 @@ command walk a directory tree. Anything the grammar does not know is refused
 (`sh-args`), so a new flag cannot smuggle a file past the path checks.
 
 Binaries added to the allowlist without a grammar get a conservative fallback:
-every operand and every `--opt=value` value is treated as a path, and `-r`,
-`-R` or `--recursive` anywhere means a recursive walk.
+every operand, every `--opt=value` value and every attached short-option value
+(`-o/tmp/x`) is treated as a path, and so is each of them without a leading
+`@` (curl's `@file`: `-d @.env`, `--data=@.env`, `-d@.env`, `-F f=@.env`).
+Any value after `=` or name after `@` (`name@.env`) must not be a protected
+path either. `-r`, `-R` or `--recursive` anywhere means a recursive walk.
 """
 
 from __future__ import annotations
@@ -41,6 +44,7 @@ class Grammar:
 @dataclass
 class ParsedArgv:
     paths: list[str] = field(default_factory=list)       # every file the command may open
+    names: list[str] = field(default_factory=list)       # words that may name one (fallback)
     walk_roots: list[str] = field(default_factory=list)  # trees it will descend
     max_depth: int | None = None                         # find -maxdepth
     errors: list[str] = field(default_factory=list)      # options outside the grammar
@@ -270,12 +274,36 @@ def _parse_find(args: list[str]) -> ParsedArgv:
     return out
 
 
+def spellings(token: str) -> set[str]:
+    """Every file `token` may name to a program whose syntax is unknown: the
+    token, an attached short-option value (`-d@.env`), a value after `=`
+    (`--data=@.env`, `f=@.env`), a name after `@` (`name@.env`), each also
+    without a leading `@`."""
+    found = {token, token.partition("=")[2], token.partition("@")[2]}
+    if token.startswith("-") and not token.startswith("--"):
+        found.add(token[2:])
+    found |= {f[1:] for f in found if f.startswith("@")}
+    return {f for f in found if f and "\0" not in f}
+
+
+def _as_files(value: str) -> list[str]:
+    """A value the program may open, as written and without curl's `@`
+    (`@.env`, `f=@.env`)."""
+    files = [value]
+    _, eq, after = value.partition("=")
+    for spelled in (value, after if eq else ""):
+        if spelled.startswith("@") and len(spelled) > 1:
+            files.append(spelled[1:])
+    return files
+
+
 def _parse_fallback(args: list[str]) -> ParsedArgv:
     out = ParsedArgv()
     operands: list[str] = []
     recursive = False
     end_of_options = False
     for arg in args:
+        out.names.extend(sorted(spellings(arg)))
         if end_of_options or arg == "-" or not arg.startswith("-"):
             operands.append(arg)
         elif arg == "--":
@@ -284,10 +312,15 @@ def _parse_fallback(args: list[str]) -> ParsedArgv:
             name, eq, value = arg[2:].partition("=")
             recursive |= name == "recursive"
             if eq:
-                out.paths.append(value)
+                out.paths.extend(_as_files(value))
         else:
             recursive |= "r" in arg[1:] or "R" in arg[1:]
-    out.paths.extend(o for o in operands if o != "-")
+            if len(arg) > 2:
+                # An attached value, as the option would read it: -d@.env, -o/tmp/x
+                out.paths.extend(_as_files(arg[2:]))
+    for operand in operands:
+        if operand != "-":
+            out.paths.extend(_as_files(operand))
     if recursive:
         out.walk_roots = [o for o in operands if o != "-"] or ["."]
     return out

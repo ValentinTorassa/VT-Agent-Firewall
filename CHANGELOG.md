@@ -2,6 +2,54 @@
 
 ## Unreleased
 
+- **A param of the wrong type is refused, never raised** (#12). Each tool's
+  params are type-checked before any rule runs: `path`, `cwd`, `content`,
+  `command`, `command_line`, `url`, `method`, `body`, `server`, `tool`, `uri`,
+  `audience` and `operation` must be strings when present, `args` a list of
+  strings or numbers, `via_shell` a boolean, and MCP and API `arguments` JSON
+  data. Anything else is `parse-error`. Before, a `url` of `123` raised
+  `AttributeError`, so the caller had to fail closed on its own; `args` as a
+  dict ran its keys as argv; `via_shell: 0` skipped the shell-syntax check, and
+  a non-string `content` was allowed and then failed in the executor.
+  Behaviour change: `{"method": null}` or `["GET"]` is `parse-error`, not
+  `net-allowlist`, and `cwd: null` is refused instead of meaning the sandbox root.
+- `PolicyEngine.evaluate` never raises: any other failure while evaluating (a
+  nesting too deep to walk, a cycle) is a `parse-error` refusal too.
+- A request whose params JSON cannot encode (bytes, a non-string key, a cycle)
+  no longer breaks the audit store and turns the gateway `fail-closed` until
+  restart: the record is written with those values replaced by their type (and
+  length, for bytes), never their content.
+- Corpus: three cases with wrong-typed params for every tool.
+
+- **`@file` arguments are checked for every binary without a grammar** (#11).
+  `shell_ask` and `shell_exact` already looked inside `@file`, `--opt=@file` and
+  `-d@file`; a binary on `shell_allowlist` did not, so with `curl` allowlisted
+  `curl -d @.env URL` was `sh-ok` and sent the file. The conservative fallback
+  now treats as paths every operand, `--opt=value` value and attached short
+  value (`-o/tmp/x`), each also without a leading `@`, and refuses any value
+  after `=` or name after `@` (`-F f=@.env`, `--data-urlencode name@.env`)
+  that is a protected path. It applies to all three grants.
+- Behaviour change, stricter for existing policies: with a grammar-less binary
+  allowlisted, `curl -d @.env`, `--data=@.env`, `-d@.env`, `-F f=@.env` and
+  `name@.env` go from allow to `sh-paths`, and so do `-d @/etc/hosts`,
+  `-d@../x` and `-o/tmp/x`, which leave the sandbox (as `-T /etc/hosts` and
+  `-o /tmp/x` already did). Binaries with a grammar decide as before.
+- `--learn-mode ask` refuses these instead of asking about them: it asks only
+  when the rest of the policy would let the call through, and now it would not.
+- Naming a protected path through any of these spellings taints the session,
+  even when the binary is off the allowlist (`curl -d @.env` did not).
+- Corpus: the four spellings from the issue, `name@.env` and two sandbox escapes.
+
+- **The MCP proxy protects its own policy file and audit log** (#8). At startup
+  `vt-agent-firewall-mcp` adds the real paths of `--policy` and `--audit`
+  (`realpath`: symlinks and relative paths resolved) to the protected paths, as
+  the agent hook does with its own: a `tools/call` or `resources/read` that names
+  either is refused with `mcp-protected-path` before the server sees it, and taints
+  the session like any protected path. **Behaviour change:** calls that name
+  either file used to be decided like any other path (inside the sandbox, a read
+  or a registered write reached the server). With `--learn`, each observation's
+  `self_protected` lists both next to the trace, so the proposal keeps them
+  protected when it replays.
 - **`--drop-unused` narrows only what the traces cover** (#9). The hook's
   surfaces (allowlisted binaries, writable directories, `shell_ask`,
   `shell_exact`, `network.allow`) are listed as unused and dropped only when a

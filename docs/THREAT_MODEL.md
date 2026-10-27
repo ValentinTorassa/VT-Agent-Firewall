@@ -43,8 +43,8 @@ hook installed (see [docs/AGENT_HOOKS.md](AGENT_HOOKS.md#limits)).
 6. Social engineering of the approver through the agent's own description of an action.
 7. Breaking the audit trail so that actions happen unrecorded.
 8. Protocol tricks against the MCP proxy: path arguments under any name, paths
-   outside the sandbox, `resources/read`, JSON-RPC batches, and `tools/call` sent
-   as a notification.
+   outside the sandbox, `resources/read`, JSON-RPC batches, `tools/call` sent
+   as a notification, and calls that name the proxy's own policy file or audit log.
 9. Host shell tricks against the agent hook: a line that an agent host's Bash tool
    hands to a real shell, where `;`, pipes, redirects, `$(...)`, variables, globs,
    braces and `~` would change what runs after the argv was checked; patches that
