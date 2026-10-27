@@ -116,8 +116,8 @@ malformed entry is a policy that cannot load, so the hook denies everything.
   non-ASCII, and `..` (plain or encoded) under a path prefix. The executor does
   not follow redirects.
 
-None of them skips another check: paths (for these two shell grants also
-`@file`, `--opt=@file` and `-d@file`), the sandbox, forbidden options, recursive
+None of them skips another check: paths (for a binary without a grammar, also
+`@file`, `--opt=@file`, `-d@file` and `name@file`), the sandbox, forbidden options, recursive
 walks and `sh-syntax` come first, and a session that went for a protected path
 gets none of them (`taint-session`). What they cannot do: an exact command fixes
 the argv, not what the program runs (`python3 -m pytest` imports any test file
@@ -342,7 +342,8 @@ These are deliberate v0 boundaries, not hidden ones:
   examples.
   See [docs/LEARNING.md](docs/LEARNING.md#limits).
 - **The shell grammars follow GNU userland** (coreutils, grep, findutils). Binaries
-  added without a grammar get a conservative fallback. See the
+  added without a grammar get a conservative fallback: every word that may name a
+  file, curl's `@file` spellings included, is checked like a path. See the
   [threat model](docs/THREAT_MODEL.md#known-limitations) for the rest.
 - **Audit records are minimized:** written content is kept as a SHA-256 and a
   length, network bodies as a 64-character preview plus a digest. Pass
