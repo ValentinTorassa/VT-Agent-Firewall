@@ -34,7 +34,13 @@ class AuditLogger:
             raise AuditUnavailable(f"cannot open audit log {self.path}: {e}") from e
 
     def log(self, record: dict) -> None:
-        line = json.dumps(record, sort_keys=True) + "\n"
+        try:
+            line = json.dumps(record, sort_keys=True) + "\n"
+        except Exception:
+            # A caller's params the encoder cannot write (bytes, a non-string
+            # key, a cycle) are still recorded, by type. The store is fine, so
+            # a malformed request is no reason to fail closed for good.
+            line = json.dumps(plain(record), sort_keys=True) + "\n"
         # Several processes may append to one file (parallel agent-hook calls):
         # hold an exclusive lock for the whole record so lines never interleave.
         if fcntl is not None:
@@ -54,3 +60,26 @@ class AuditLogger:
 
     def close(self) -> None:
         self._fh.close()
+
+
+MAX_DEPTH = 64
+
+
+def plain(value, depth: int = 0, seen: frozenset = frozenset()):
+    """`value` with everything JSON cannot encode replaced by a note of its type
+    (and length, for bytes): never the value itself, which may be content the
+    audit view would have reduced to a digest."""
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return value
+    if depth >= MAX_DEPTH or id(value) in seen:
+        return {"unserializable": "too deep" if depth >= MAX_DEPTH else "cycle"}
+    inner = seen | {id(value)}
+    if isinstance(value, dict):
+        return {(k if isinstance(k, str) else f"<{type(k).__name__}> {k!r}"):
+                plain(v, depth + 1, inner) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [plain(v, depth + 1, inner) for v in value]
+    note = {"unserializable": type(value).__name__}
+    if isinstance(value, (bytes, bytearray)):
+        note["bytes"] = len(value)
+    return note

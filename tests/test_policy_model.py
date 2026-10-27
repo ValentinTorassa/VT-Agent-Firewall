@@ -495,12 +495,18 @@ class TestNetworkAllowlist(PolicyModelBase):
     def test_only_get_and_head_without_a_body(self):
         url = "https://docs.python.org/3/"
         for params in ({"method": "POST"}, {"method": "PUT"}, {"method": "get"},
-                       {"method": "DELETE"}, {"method": None}, {"method": ["GET"]},
+                       {"method": "DELETE"},
                        {"method": "GET", "body": "synthetic"},
                        {"method": "GET", "body": ""}):
             with self.subTest(params=params):
                 self.assertDecision(self.fetch(self.net, url, **params), "block",
                                     "net-allowlist")
+        # A method or body that is not a string is a malformed request (#12).
+        for params in ({"method": None}, {"method": ["GET"]},
+                       {"method": "GET", "body": {"a": 1}}):
+            with self.subTest(params=params):
+                self.assertDecision(self.fetch(self.net, url, **params), "block",
+                                    "parse-error")
 
     def test_a_tainted_session_gets_no_network(self):
         session = SessionState(tainted=True)
