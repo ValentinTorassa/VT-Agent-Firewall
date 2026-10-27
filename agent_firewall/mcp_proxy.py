@@ -27,6 +27,13 @@ available at /dev/tty.
         --audit logs/mcp-audit.jsonl --server-name filesystem \\
         -- npx -y @modelcontextprotocol/server-filesystem /path/to/dir
 
+Learning mode (`--learn TRACE`, agent_firewall/learn.py) appends one
+observation per `tools/call` and `resources/read` to TRACE for
+`vt-agent-firewall-propose`, written before anything reaches the server. The
+policy is still enforced (there is no ask mode here), the trace is added to the
+protected paths, and once the trace cannot be opened or written every call is
+refused (`fail-closed`) until the proxy restarts, as with the audit log.
+
 Limitation: calls are handled one at a time; while a tool call is in flight the
 proxy does not read further client messages (cancellations wait their turn).
 """
@@ -37,12 +44,15 @@ import argparse
 import hashlib
 import itertools
 import json
+import os
 import queue
 import subprocess
 import sys
 import threading
+import uuid
 from pathlib import Path
 
+from . import learn
 from .gateway import Gateway
 from .models import ActionRequest
 
@@ -145,16 +155,69 @@ class ServerConnection:
                 self.proc.kill()
 
 
+class Learner:
+    """`--learn TRACE`: one observation per gated request, before it executes.
+
+    The proxy is one session (one client, one gateway, one taint flag), so every
+    observation carries the same generated session id. The trace joins the
+    protected paths before anything is decided. Once it cannot be opened or
+    written, every observation fails, so the gateway refuses every allowed call
+    from then on: a trace with a torn or missing line is not one to propose from.
+    """
+
+    HOST = "mcp-proxy"
+
+    def __init__(self, gateway: Gateway, trace: str | Path, policy: str | Path,
+                 server_name: str):
+        self.gateway = gateway
+        self.session_id = f"mcp-{server_name}-{uuid.uuid4().hex[:12]}"
+        own = Path(os.path.realpath(trace))
+        gateway.config.protected.add(own)
+        self.error: str | None = None
+        self.writer = None
+        try:
+            self.writer = learn.TraceWriter(trace, "enforce", gateway.config, policy,
+                                            self_protected=[own])
+        except learn.TraceUnavailable as e:
+            self._fail(str(e))
+
+    def observer(self, method: str):
+        def observe(record: dict) -> None:
+            if self.error is not None:
+                raise learn.TraceUnavailable(f"learning trace unavailable ({self.error})")
+            try:
+                self.writer.observe({**record, "host": self.HOST, "host_tool": method,
+                                     "session_id": self.session_id},
+                                    tainted=self.gateway.session.tainted)
+            except Exception as e:
+                self._fail(str(e))
+                raise
+        return observe
+
+    def _fail(self, error: str) -> None:
+        self.error = error
+        log(f"{error}; refusing every tool call until restarted (fail-closed)")
+
+    def close(self) -> None:
+        if self.writer is not None:
+            self.writer.close()
+
+
 class McpProxy:
     def __init__(self, gateway: Gateway, server_name: str,
-                 server_argv: list[str], client_in=None, client_out=None):
+                 server_argv: list[str], client_in=None, client_out=None,
+                 learner: Learner | None = None):
         self.gateway = gateway
         self.server_name = server_name
         self.client_in = client_in or sys.stdin
         self.client_out = client_out or sys.stdout
+        self.learner = learner
         self._out_lock = threading.Lock()
         self.server = ServerConnection(server_argv, relay=self.to_client)
         gateway.executor.mcp_backends[server_name] = self.server
+
+    def _observe(self, method: str):
+        return self.learner.observer(method) if self.learner is not None else None
 
     def to_client(self, message: dict) -> None:
         with self._out_lock:
@@ -176,6 +239,8 @@ class McpProxy:
                 self.dispatch(message)
         finally:
             self.server.stop()
+            if self.learner is not None:
+                self.learner.close()
 
     RELAYED_METHODS = frozenset({
         "initialize", "ping", "prompts/list", "prompts/get", "completion/complete",
@@ -242,7 +307,8 @@ class McpProxy:
         params = message.get("params") or {}
         req = ActionRequest(actor="mcp-client", tool="mcp.resource", params={
             "server": self.server_name, "uri": params.get("uri")})
-        record, result = self.gateway.handle_with_result(req)
+        record, result = self.gateway.handle_with_result(
+            req, observe=self._observe("resources/read"))
         if record["outcome"] == "executed":
             return {"jsonrpc": JSONRPC, "id": message["id"], "result": result}
         if record["outcome"] == "error":
@@ -278,7 +344,8 @@ class McpProxy:
         req = ActionRequest(actor="mcp-client", tool="mcp.call", params={
             "server": self.server_name, "tool": params.get("name"),
             "arguments": params.get("arguments", {})})
-        record, result = self.gateway.handle_with_result(req)
+        record, result = self.gateway.handle_with_result(
+            req, observe=self._observe("tools/call"))
         if record["outcome"] == "executed":
             return {"jsonrpc": JSONRPC, "id": message["id"], "result": result}
         if record["outcome"] == "error":
@@ -354,6 +421,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="PATH=SHA256 the server's code must match")
     parser.add_argument("--tty-approval", action="store_true",
                         help="ask for approvals on /dev/tty instead of denying")
+    parser.add_argument("--learn", metavar="TRACE",
+                        help="learning mode: also append one observation per "
+                             "tools/call and resources/read to TRACE (JSONL) for "
+                             "vt-agent-firewall-propose; the policy is still enforced, "
+                             "the trace is protected, and a trace that cannot be "
+                             "written refuses every call")
     parser.add_argument("server", nargs=argparse.REMAINDER,
                         help="-- followed by the MCP server command")
     args = parser.parse_args(argv)
@@ -364,8 +437,10 @@ def main(argv: list[str] | None = None) -> int:
     approver = TtyApprover() if args.tty_approval else DenyApprover()
     gateway = Gateway(args.policy, args.audit, approver=approver,
                       base_dir=args.base_dir)
+    learner = (Learner(gateway, args.learn, args.policy, args.server_name)
+               if args.learn else None)
     log(f"proxying MCP server {args.server_name!r}: {' '.join(server_argv)}")
-    McpProxy(gateway, args.server_name, server_argv).run()
+    McpProxy(gateway, args.server_name, server_argv, learner=learner).run()
     return 0
 
 

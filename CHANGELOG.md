@@ -21,6 +21,17 @@
 - `scripts/run_learning_demo.py` sends `PostToolUse` after each call that runs
   and refuses two asks; `docs/LEARNING.md` documents the event, the trace
   records and the limits.
+- **The MCP proxy records learning traces** (#5): `vt-agent-firewall-mcp --learn
+  TRACE` writes one observation per `tools/call` and `resources/read`, before
+  anything reaches the server, with the hook's guarantees: the answers do not
+  change, the trace is added to the protected paths, and once it cannot be
+  opened or written every call is refused (`fail-closed`) until restart.
+  Enforce only. One proxy run is one session.
+- `Gateway.handle_with_result(req, observe=...)` hands each decision's record
+  to an observer before anything executes; if the observer fails, an allowed
+  action is not executed and its intent is resolved as a `fail-closed` block.
+- `vt-agent-firewall-propose` replays `mcp.resource` observations against the
+  policy too, and explains `mcp-resources-denied`.
 
 ## 0.3.0 — 2026-10-23
 
