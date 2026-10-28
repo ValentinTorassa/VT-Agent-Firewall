@@ -37,9 +37,9 @@ frenar antes que actuar sin auditoría. Todo queda en `logs/audit.jsonl`.
 
 ![El mismo agente con prompt injection sin el gateway (la clave falsa se exfiltra) y a través de él (cada intento bloqueado y auditado)](docs/demo.gif)
 
-**Estado: alpha (0.3.0).** Sólo stdlib, Python 3.11+. Hecho como implementación de
+**Estado: alpha (0.4.0).** Sólo stdlib, Python 3.11+. Hecho como implementación de
 referencia de la charla *"Dónde se rompe OAuth cuando el que llama es un agente"*
-(OWASP Village, Ekoparty 2026). No es production-ready; ver
+(OWASP Village, Ekoparty 2026; OWASP ROS:SEC 2026). No es production-ready; ver
 [Limitaciones](#limitaciones). Datos sintéticos solamente.
 
 ## Inicio rápido
@@ -487,7 +487,10 @@ incluyas prompts crudos, argumentos de herramientas ni secretos.
 La v0.1.0 sacó el gateway, el token broker con los cuatro modos de falla de OAuth y el
 proxy MCP; la v0.1.1 cierra los bypasses encontrados en la revisión; la v0.2.0 suma
 el hook `PreToolUse` para Claude Code y Codex; la v0.3.0 suma el modo aprendizaje, que
-registra una sesión y propone una política ([CHANGELOG](CHANGELOG.md)). Lo que
+registra una sesión y propone una política; la v0.4.0 suma permisos más acotados,
+cierra los caminos por los que una allowlist igual dejaba salir un secreto y deja la
+política y los settings que cargan el firewall fuera del alcance del agente
+([CHANGELOG](CHANGELOG.md)). Lo que
 sigue:
 
 1. Tokens atados al emisor (DPoP), para que un access token robado no sirva.

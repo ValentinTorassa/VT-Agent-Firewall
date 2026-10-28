@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 — 2026-10-28
+
+Grants narrower than a whole binary or the whole network, learning that counts
+an ask only once it ran, and the two failures the OWASP ROS:SEC 2026 talk shows
+in the firewall itself, closed past the fixes it cites: an allowlist that still
+lets a secret out, and an agent that can change what judges it.
 
 - **Secret values never leave in a request (`secret_files`, `secret-egress`).**
   An allowlist could still let a secret out: a value that reached the agent

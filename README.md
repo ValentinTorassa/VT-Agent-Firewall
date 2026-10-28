@@ -23,10 +23,10 @@ than act unaudited.
 
 ![The same prompt-injected agent without the gateway (the fake key is exfiltrated) and through it (every attempt blocked and audited)](docs/demo.gif)
 
-**Status: alpha (0.3.0).** Standard library only, Python 3.11+. Built as the
+**Status: alpha (0.4.0).** Standard library only, Python 3.11+. Built as the
 reference implementation for the talk *"Dónde se rompe OAuth cuando el que llama es
-un agente"* (OWASP Village, Ekoparty 2026). Not production-ready; see
-[Limitations](#limitations).
+un agente"* (OWASP Village, Ekoparty 2026; OWASP ROS:SEC 2026). Not
+production-ready; see [Limitations](#limitations).
 
 ## Quickstart
 
@@ -449,7 +449,9 @@ Keep traces synthetic and do not include raw prompts, tool arguments, or secrets
 v0.1.0 shipped the gateway, the token broker with the four OAuth failure modes, and
 the MCP proxy; v0.1.1 closes the bypasses found in review; v0.2.0 adds the
 `PreToolUse` hook for Claude Code and Codex; v0.3.0 adds learning mode, which records a
-session and proposes a policy ([CHANGELOG](CHANGELOG.md)).
+session and proposes a policy; v0.4.0 adds narrower grants, closes the ways an
+allowlist still let a secret out, and keeps the agent away from the policy and the
+settings that load the firewall ([CHANGELOG](CHANGELOG.md)).
 Next:
 
 1. Sender-constrained tokens (DPoP), so a stolen access token is useless.

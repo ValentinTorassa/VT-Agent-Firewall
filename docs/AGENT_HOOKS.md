@@ -77,7 +77,7 @@ read nor rewrite them through a gated tool
 1. Install the package and find the absolute path of the hook:
 
    ```bash
-   pip install 'vt-agent-firewall>=0.3.0'
+   pip install 'vt-agent-firewall>=0.4.0'
    command -v vt-agent-firewall-hook
    ```
 
