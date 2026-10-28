@@ -14,7 +14,10 @@ the server; the proxy launches the real server and relays JSON-RPC over stdio.
   come back empty and subscriptions are refused.
 - The policy file and the audit log given on the command line join the
   protected paths at startup, as in the agent hook: a call that names either
-  is refused (`mcp-protected-path`) before the server sees it.
+  is refused (`mcp-protected-path`) before the server sees it. `--protect PATH`
+  adds more (the MCP client config that launches the proxy, such as
+  `.mcp.json`), and `--policy-sha256` refuses to start on a policy file that
+  changed.
 - Only known MCP methods are relayed (initialize, ping, prompts, completion,
   logging, notifications, and answers to the server's own requests; a policy
   can add more with `mcp_relay_methods`). Anything else is refused, and
@@ -432,6 +435,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--base-dir", help="resolve relative policy paths here")
     parser.add_argument("--pin", action="append", default=[],
                         help="PATH=SHA256 the server's code must match")
+    parser.add_argument("--policy-sha256", metavar="HEX",
+                        help="SHA-256 the policy file must match, or the proxy "
+                             "refuses to start")
+    parser.add_argument("--protect", action="append", default=[], metavar="PATH",
+                        help="another file or directory no tool call may name, as "
+                             "the policy and the audit log (the client config that "
+                             "launches this proxy); repeatable")
     parser.add_argument("--tty-approval", action="store_true",
                         help="ask for approvals on /dev/tty instead of denying")
     parser.add_argument("--learn", metavar="TRACE",
@@ -448,11 +458,16 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("missing the MCP server command after --")
     verify_pins(args.pin)
     approver = TtyApprover() if args.tty_approval else DenyApprover()
-    gateway = Gateway(args.policy, args.audit, approver=approver,
-                      base_dir=args.base_dir)
+    try:
+        gateway = Gateway(args.policy, args.audit, approver=approver,
+                          base_dir=args.base_dir, policy_sha256=args.policy_sha256)
+    except (OSError, ValueError) as e:
+        raise SystemExit(f"agent firewall: cannot load policy {args.policy}: {e}; "
+                         f"refusing to start the server") from None
     # Self-protection, as in the hook: no tool call may read or rewrite the
-    # policy that judges the agent or the log that records it.
-    own = protect_own_files(gateway, args.policy, args.audit)
+    # policy that judges the agent, the log that records it, or what else the
+    # command line names (the config that launches the proxy).
+    own = protect_own_files(gateway, args.policy, args.audit, *args.protect)
     learner = (Learner(gateway, args.learn, args.policy, args.server_name,
                        self_protected=own)
                if args.learn else None)

@@ -7,6 +7,8 @@ repo root for policies/default.json).
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -53,9 +55,16 @@ class ExactCommand:
 
 
 class Config:
-    def __init__(self, path: str | Path, base_dir: str | Path | None = None):
+    def __init__(self, path: str | Path, base_dir: str | Path | None = None,
+                 sha256: str | None = None):
+        """`sha256` pins the policy file: its bytes are read once and, when
+        their digest is not the pinned one, refused (ValueError) before they
+        are parsed. Whatever rewrote the file never gets its rules loaded."""
         path = Path(path)
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        data = path.read_bytes()
+        if sha256 is not None:
+            check_pin(path, data, sha256)
+        raw = json.loads(data.decode("utf-8"))
         base = Path(base_dir) if base_dir else path.resolve().parent.parent
         self._load(raw, base.resolve())
 
@@ -227,3 +236,16 @@ class Config:
     def in_writable(self, resolved: Path) -> bool:
         return any(d == resolved or d in resolved.parents for d in self.writable_dirs)
 
+
+PIN = re.compile(r"[0-9a-fA-F]{64}")
+
+
+def check_pin(path: Path, data: bytes, expected: str) -> None:
+    """Refuse a policy file whose SHA-256 is not the pinned one."""
+    if not isinstance(expected, str) or not PIN.fullmatch(expected):
+        raise ValueError(f"policy pin {expected!r} is not a SHA-256 (64 hex characters)")
+    actual = hashlib.sha256(data).hexdigest()
+    if not hmac.compare_digest(actual, expected.lower()):
+        raise ValueError(f"{path} does not match its pin (sha256 {actual}, pinned "
+                         f"{expected.lower()}): something changed the policy, so it is "
+                         f"not loaded. Review the file, then pin its new digest")

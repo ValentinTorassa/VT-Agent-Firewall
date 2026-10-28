@@ -46,8 +46,10 @@ class Gateway:
     def __init__(self, config_path: str | Path, audit_path: str | Path,
                  approver=None, base_dir: str | Path | None = None,
                  broker=None, subject: str | None = None, apis=None,
-                 mcp_backends=None, audit_verbose: bool | None = None):
-        self.config = Config(config_path, base_dir=base_dir)
+                 mcp_backends=None, audit_verbose: bool | None = None,
+                 policy_sha256: str | None = None):
+        # policy_sha256 pins the policy file (Config): a changed one is refused.
+        self.config = Config(config_path, base_dir=base_dir, sha256=policy_sha256)
         # Verbose audit keeps written content and bodies in full: for local
         # debugging only, never for a shared log.
         self.audit_verbose = (self.config.audit_verbose if audit_verbose is None

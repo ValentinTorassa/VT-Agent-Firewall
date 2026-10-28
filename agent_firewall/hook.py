@@ -34,9 +34,19 @@ call the host ran, so the proposal can tell an ask you approved from one you
 refused. That event comes after the fact: the hook never answers it (no JSON,
 never exit 2) and only records; without --learn it does nothing.
 
-Fail-closed: unparseable input, a tool it cannot map, an unreadable policy, an
-unavailable audit log or learning trace, an internal error or the hook's own
-deadline all deny.
+Self-protection: the policy, the audit log, the session taint store, the
+learning trace and the host settings that install the hook (HOST_FILES:
+`.claude/settings*.json`, `.mcp.json`, `~/.claude/settings.json`,
+`.codex/config.toml`, `.codex/hooks.json`, ...) join the protected paths, so a
+gated tool can neither read nor rewrite the rules that judge it nor the
+settings that load them. `--protect PATH` adds more. `--policy-sha256` pins
+the policy: a policy file that changed by any route (a tool the hook does not
+see, an allowed `git checkout`, a process outside the agent) is not loaded,
+and every call is denied until a human pins the new digest.
+
+Fail-closed: unparseable input, a tool it cannot map, an unreadable policy or
+one that does not match its pin, an unavailable audit log, taint store or
+learning trace, an internal error or the hook's own deadline all deny.
 A denial is given both ways the hosts understand: JSON on stdout and exit code
 2 with the reason on stderr. Any other non-zero exit would let the tool run,
 so every error path ends in that same denial.
@@ -66,7 +76,7 @@ from pathlib import Path
 
 from . import learn
 from .audit import AuditLogger, AuditUnavailable
-from .config import Config
+from .config import PIN, Config
 from .gateway import Gateway
 from .models import ActionRequest
 from .session import TaintStore, TaintUnavailable
@@ -75,6 +85,19 @@ HOSTS = ("claude-code", "codex")
 MAX_INPUT_BYTES = 64 * 1024 * 1024
 DEFAULT_DEADLINE_SEC = 20.0
 REASON_MAX_CHARS = 2000
+
+# The host settings that install this hook, under each project directory and
+# the user's config directory. An agent that could write one could remove the
+# hook, turn every hook off (Claude Code's `disableAllHooks`), point `--policy`
+# at a file it wrote, or launch an MCP server without the proxy. Protected
+# whether they exist or not: creating `.claude/settings.local.json` is enough.
+HOST_FILES = {
+    "claude-code": {"project": (".claude/settings.json", ".claude/settings.local.json",
+                                ".mcp.json"),
+                    "user": ("settings.json", "settings.local.json")},
+    "codex": {"project": (".codex/config.toml", ".codex/hooks.json"),
+              "user": ("config.toml", "hooks.json")},
+}
 
 # Codex apply_patch file headers (codex-rs/apply-patch/src/parser.rs).
 PATCH_FILE_MARKERS = ("*** Add File:", "*** Delete File:", "*** Update File:",
@@ -224,8 +247,8 @@ def evaluate(args: argparse.Namespace, raw: bytes, event: dict | None = None) ->
     host = args.host
     try:
         gateway = Gateway(args.policy, args.audit, approver=NoApprover(),
-                          base_dir=args.base_dir)
-    except Exception as e:  # unreadable or invalid policy
+                          base_dir=args.base_dir, policy_sha256=args.policy_sha256)
+    except Exception as e:  # unreadable, invalid or not matching its pin
         reason = f"agent firewall: cannot load policy {args.policy}: {e}"
         _audit_without_policy(args.audit, host, reason)
         return Verdict("deny", reason)
@@ -233,9 +256,10 @@ def evaluate(args: argparse.Namespace, raw: bytes, event: dict | None = None) ->
     taint = None
     try:
         # Self-protection: the agent may neither read nor rewrite the policy
-        # that judges it, the log that records it, the record of its own taint
-        # or the trace a policy will be proposed from.
-        own = _own_files(args)
+        # that judges it, the log that records it, the record of its own taint,
+        # the trace a policy will be proposed from or the settings that load
+        # this hook.
+        own = _own_files(args, gateway.config)
         gateway.config.protected.update(own)
         try:
             taint = TaintStore(taint_path(args.audit))
@@ -270,9 +294,33 @@ def taint_path(audit: str) -> str:
     return os.path.realpath(audit) + ".tainted"
 
 
-def _own_files(args: argparse.Namespace) -> list[Path]:
-    files = (args.policy, args.audit, taint_path(args.audit), args.learn)
-    return [Path(os.path.realpath(p)) for p in files if p]
+def host_files(host: str, projects, environ=None) -> list[Path]:
+    """The host settings that load the hook (HOST_FILES), under every project
+    directory in `projects` and the host's user config directory
+    (`CLAUDE_CONFIG_DIR` or `~/.claude`, plus `~/.claude.json`; `CODEX_HOME`
+    or `~/.codex`)."""
+    environ = os.environ if environ is None else environ
+    names = HOST_FILES[host]
+    roots = {Path(p) for p in projects if p}
+    if host == "claude-code" and environ.get("CLAUDE_PROJECT_DIR"):
+        roots.add(Path(environ["CLAUDE_PROJECT_DIR"]))
+    files = [root / name for root in sorted(roots) for name in names["project"]]
+    home = environ.get("HOME")
+    if host == "claude-code":
+        user = environ.get("CLAUDE_CONFIG_DIR") or (home and f"{home}/.claude")
+        if home:
+            files.append(Path(home) / ".claude.json")
+    else:
+        user = environ.get("CODEX_HOME") or (home and f"{home}/.codex")
+    if user:
+        files += [Path(user) / name for name in names["user"]]
+    return files
+
+
+def _own_files(args: argparse.Namespace, config: Config) -> list[Path]:
+    files = [args.policy, args.audit, taint_path(args.audit), args.learn, *args.protect,
+             *host_files(args.host, (args.base_dir, config.sandbox_root))]
+    return sorted({Path(os.path.realpath(p)) for p in files if p})
 
 
 def _evaluate_event(gateway: Gateway, host: str, raw: bytes,
@@ -394,13 +442,13 @@ def record_ran(args: argparse.Namespace, event: dict) -> Verdict:
         return Verdict("error", f"agent firewall: PostToolUse event without "
                                 f"{', '.join(missing)}; not recorded")
     try:
-        config = Config(args.policy, base_dir=args.base_dir)
-    except Exception as e:  # unreadable or invalid policy
+        config = Config(args.policy, base_dir=args.base_dir, sha256=args.policy_sha256)
+    except Exception as e:  # unreadable, invalid or not matching its pin
         return Verdict("error", f"agent firewall: cannot load policy {args.policy}: {e}; "
                                 f"PostToolUse not recorded")
     try:
         trace = learn.TraceWriter(args.learn, args.learn_mode, config, args.policy,
-                                  self_protected=_own_files(args))
+                                  self_protected=_own_files(args, config))
     except learn.TraceUnavailable as e:
         return Verdict("error", f"agent firewall: {e}; PostToolUse not recorded")
     try:
@@ -503,6 +551,12 @@ class _Parser(argparse.ArgumentParser):
         raise SystemExit(2)
 
 
+def _pin(value: str) -> str:
+    if not PIN.fullmatch(value):
+        raise argparse.ArgumentTypeError(f"{value!r} is not a SHA-256 (64 hex characters)")
+    return value.lower()
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = _Parser(prog="vt-agent-firewall-hook",
                      description="PreToolUse hook for Claude Code and Codex: the "
@@ -515,6 +569,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--host", choices=HOSTS, default="claude-code",
                         help="hook protocol to speak (default: claude-code)")
     parser.add_argument("--base-dir", help="resolve relative policy paths here")
+    parser.add_argument("--policy-sha256", metavar="HEX", type=_pin,
+                        help="SHA-256 the policy file must match: a policy that "
+                             "changed is not loaded and every call is denied. Keep "
+                             "this command where the agent cannot write (user or "
+                             "managed settings)")
+    parser.add_argument("--protect", action="append", default=[], metavar="PATH",
+                        help="another file or directory the agent may neither read "
+                             "nor change, as the policy and the host settings are "
+                             "(a wrapper script, the virtualenv the hook runs from); "
+                             "repeatable")
     parser.add_argument("--emit-allow", action="store_true",
                         help="Claude Code only: answer an allowed call with an "
                              "explicit allow, which skips Claude Code's own "
