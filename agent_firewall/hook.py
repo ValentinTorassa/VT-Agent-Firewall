@@ -69,6 +69,7 @@ from .audit import AuditLogger, AuditUnavailable
 from .config import Config
 from .gateway import Gateway
 from .models import ActionRequest
+from .session import TaintStore, TaintUnavailable
 
 HOSTS = ("claude-code", "codex")
 MAX_INPUT_BYTES = 64 * 1024 * 1024
@@ -229,12 +230,21 @@ def evaluate(args: argparse.Namespace, raw: bytes, event: dict | None = None) ->
         _audit_without_policy(args.audit, host, reason)
         return Verdict("deny", reason)
     trace = None
+    taint = None
     try:
         # Self-protection: the agent may neither read nor rewrite the policy
-        # that judges it, the log that records it or the trace a policy will
-        # be proposed from.
+        # that judges it, the log that records it, the record of its own taint
+        # or the trace a policy will be proposed from.
         own = _own_files(args)
         gateway.config.protected.update(own)
+        try:
+            taint = TaintStore(taint_path(args.audit))
+        except TaintUnavailable as e:
+            req = ActionRequest(actor=host, tool=f"{host}:hook-input",
+                                params={"input": _digest(raw)})
+            record = gateway.refuse(req, "fail-closed", f"{e}; failing closed",
+                                    host=host)
+            return Verdict("deny", _blocked(record))
         if args.learn:
             try:
                 trace = learn.TraceWriter(args.learn, args.learn_mode, gateway.config,
@@ -245,21 +255,30 @@ def evaluate(args: argparse.Namespace, raw: bytes, event: dict | None = None) ->
                 record = gateway.refuse(req, "fail-closed", f"{e}; failing closed",
                                         host=host)
                 return Verdict("deny", _blocked(record))
-        return _evaluate_event(gateway, host, raw, trace, event)
+        return _evaluate_event(gateway, host, raw, trace, event, taint)
     finally:
         if trace is not None:
             trace.close()
+        if taint is not None:
+            taint.close()
         if gateway.audit is not None:
             gateway.audit.close()
 
 
+def taint_path(audit: str) -> str:
+    """Where the hook keeps tainted sessions: next to its audit log."""
+    return os.path.realpath(audit) + ".tainted"
+
+
 def _own_files(args: argparse.Namespace) -> list[Path]:
-    return [Path(os.path.realpath(p)) for p in (args.policy, args.audit, args.learn) if p]
+    files = (args.policy, args.audit, taint_path(args.audit), args.learn)
+    return [Path(os.path.realpath(p)) for p in files if p]
 
 
 def _evaluate_event(gateway: Gateway, host: str, raw: bytes,
                     trace: learn.TraceWriter | None = None,
-                    event: dict | None = None) -> Verdict:
+                    event: dict | None = None,
+                    taint: TaintStore | None = None) -> Verdict:
     extra: dict = {"host": host}
 
     def observed(record: dict) -> Verdict | None:
@@ -299,27 +318,50 @@ def _evaluate_event(gateway: Gateway, host: str, raw: bytes,
         approval, note = "deny", ("Codex hooks cannot ask for approval (Codex "
                                   "ignores permissionDecision ask), so it is denied")
 
+    # Each hook call is a new process, so a session's taint lives in the
+    # store: a session that went for a protected path or carried a secret
+    # value in an earlier call is tainted in this one from the start.
+    session_id = extra.get("session_id")
+    tainted_before = bool(taint is not None and session_id
+                          and taint.tainted(session_id))
+    gateway.session.tainted = tainted_before
+
+    def remember(verdict: Verdict, record: dict) -> Verdict:
+        """Keep a taint this call caused for the session's later calls. A
+        taint that cannot be recorded denies this call."""
+        if taint is None or not session_id or tainted_before \
+                or not gateway.session.tainted:
+            return verdict
+        try:
+            taint.mark(session_id, host=host, host_tool=extra.get("host_tool"),
+                       correlation_id=record.get("correlation_id"),
+                       rule_id=record.get("rule_id"))
+        except TaintUnavailable as e:
+            return Verdict("deny", f"agent firewall: {e}; failing closed")
+        return verdict
+
     # Ask mode stops asking once the session has gone for a protected path
     # (the trace remembers it across hook calls) or has no id to check.
     relax = None
-    if trace is not None and trace.mode == "ask" and extra.get("session_id") \
-            and not trace.session_tainted(extra["session_id"]):
+    if trace is not None and trace.mode == "ask" and session_id \
+            and not tainted_before and not trace.session_tainted(session_id):
         relax = learn.ask_instead_of_block(gateway.config)
     asks: list[str] = []
+    record: dict = {}
     for req in requests:
         record = gateway.decide(req, approval=approval, approval_note=note,
                                 relax=relax, **extra)
         failed = observed(record)
         if failed:
-            return failed
+            return remember(failed, record)
         if record["decision"] == "block":
-            return Verdict("deny", _blocked(record))
+            return remember(Verdict("deny", _blocked(record)), record)
         if record["decision"] == "require_approval":
             asks.append(f"agent firewall requires approval ({record['rule_id']}): "
                         f"{record['reason']}")
     if asks:
-        return Verdict("ask", "; ".join(asks))
-    return Verdict("allow", "agent firewall: allowed by policy")
+        return remember(Verdict("ask", "; ".join(asks)), record)
+    return remember(Verdict("allow", "agent firewall: allowed by policy"), record)
 
 
 def parse_event(raw: bytes) -> dict:

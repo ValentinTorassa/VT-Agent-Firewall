@@ -121,7 +121,9 @@ class TestRecording(LearnTestBase):
             self.assertEqual(obs["sandbox_root"], str(self.ws.resolve()))
             self.assertEqual(len(obs["policy_sha256"]), 64)
             self.assertIn(str(self.trace.resolve()), obs["self_protected"])
-        self.assertEqual([o["tainted"] for o in observations], [False, True, False])
+        # The hook keeps a session's taint across calls: the write after
+        # `cat .env` is still in a tainted session.
+        self.assertEqual([o["tainted"] for o in observations], [False, True, True])
 
     def test_written_content_is_kept_as_a_digest(self):
         self.call("Write", {"file_path": str(self.ws / "normal" / "out.txt"),

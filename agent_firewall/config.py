@@ -11,9 +11,10 @@ import json
 import os
 import re
 from dataclasses import dataclass
+from fnmatch import fnmatchcase
 from pathlib import Path
 
-from . import network
+from . import egress, network
 
 
 DEFAULT_MCP_PATH_ARGUMENTS = [
@@ -70,6 +71,15 @@ class Config:
         self.base_dir = base
         self.sandbox_root = self._abs(base, raw["sandbox_root"])
         self.protected = {self._abs(base, p) for p in raw["protected_paths"]}
+        # Names protected wherever they appear under the sandbox (`.env.*`,
+        # `*.pem`): a list of paths only covers the copies someone listed.
+        self.protected_names = self._names(raw.get("protected_names", []))
+        # Files whose values never leave in a request (egress.py). Each one is
+        # a protected path too: the agent may not read it either.
+        self.secret_files = [self._abs(base, p) for p in
+                             self._strings(raw.get("secret_files", []), "secret_files")]
+        self.protected.update(self.secret_files)
+        self.secrets = egress.load(self.secret_files)
         self.writable_dirs = [self._abs(base, d) for d in raw["writable_dirs"]]
         self.shell_allowlist = set(raw["shell_allowlist"])
         self.shell_forbidden_args = {
@@ -131,6 +141,24 @@ class Config:
         return value
 
     @classmethod
+    def _strings(cls, value, key: str) -> list[str]:
+        items = cls._list(value, key)
+        for item in items:
+            if not isinstance(item, str) or not item or "\0" in item:
+                raise ValueError(f"{key}: {item!r} is not a path")
+        return items
+
+    @classmethod
+    def _names(cls, value) -> tuple[str, ...]:
+        names = cls._list(value, "protected_names")
+        for name in names:
+            if not isinstance(name, str) or not name or "/" in name or "\0" in name \
+                    or name in (".", ".."):
+                raise ValueError(f"protected_names: {name!r} is not a file or directory "
+                                 f"name pattern (one name, no slash, e.g. \".env.*\")")
+        return tuple(names)
+
+    @classmethod
     def _programs(cls, value, key: str) -> list[str]:
         names = cls._list(value, key)
         for name in names:
@@ -166,8 +194,26 @@ class Config:
 
     def is_protected(self, resolved: Path) -> bool:
         """A protected entry covers itself and everything below it, so a
-        protected directory cannot be read file by file."""
-        return any(p == resolved or p in resolved.parents for p in self.protected)
+        protected directory cannot be read file by file. A name on
+        `protected_names` covers every file or directory with that name, and
+        everything below it."""
+        if any(p == resolved or p in resolved.parents for p in self.protected):
+            return True
+        return bool(self.protected_names) and self.name_protected(resolved) is not None
+
+    def name_protected(self, resolved: Path) -> str | None:
+        """The `protected_names` pattern a name in this path matches, if any.
+        Names are matched below the sandbox root (the directories above it are
+        not the agent's to name); a path outside it is matched whole."""
+        try:
+            parts = resolved.relative_to(self.sandbox_root).parts
+        except ValueError:
+            parts = resolved.parts
+        for part in parts:
+            for pattern in self.protected_names:
+                if fnmatchcase(part, pattern):
+                    return pattern
+        return None
 
     def protected_under(self, root: Path, max_depth: int | None = None) -> Path | None:
         """First protected path inside the tree rooted at `root` (depth-limited
@@ -180,3 +226,4 @@ class Config:
 
     def in_writable(self, resolved: Path) -> bool:
         return any(d == resolved or d in resolved.parents for d in self.writable_dirs)
+

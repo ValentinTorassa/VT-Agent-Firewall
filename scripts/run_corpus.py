@@ -44,8 +44,11 @@ def run_corpus() -> list[str]:
         with tempfile.TemporaryDirectory(prefix="vt-firewall-corpus-") as directory:
             temp = Path(directory)
             shutil.copytree(ROOT / "demo_workspace", temp / "demo_workspace", symlinks=True)
-            # Optional per-case setup: extra symlinks inside the workspace and
-            # extra protected paths, so a case can build the tree it attacks.
+            # Optional per-case setup: extra files and symlinks inside the
+            # workspace, so a case can build the tree it attacks.
+            for name, content in case.get("setup", {}).get("files", {}).items():
+                (temp / "demo_workspace" / name).parent.mkdir(parents=True, exist_ok=True)
+                (temp / "demo_workspace" / name).write_text(content, encoding="utf-8")
             for link, target in case.get("setup", {}).get("symlinks", []):
                 (temp / "demo_workspace" / link).symlink_to(target)
             (temp / "policy.json").write_text(json.dumps(case_policy(case)),

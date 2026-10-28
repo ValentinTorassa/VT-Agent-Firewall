@@ -9,6 +9,25 @@
     ".git/config",
     ".git/hooks"
   ],
+  "protected_names": [
+    ".env",
+    ".env.*",
+    ".envrc",
+    "*.pem",
+    "*.key",
+    "id_rsa*",
+    "id_ed25519*",
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+    ".aws",
+    ".ssh",
+    ".gnupg"
+  ],
+  "secret_files": [
+    ".env",
+    ".env.local"
+  ],
   "writable_dirs": [
     "src",
     "tests",

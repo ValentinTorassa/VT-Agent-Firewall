@@ -146,7 +146,7 @@ under the same lock:
 | `ts`, `host`, `host_tool`, `session_id`, `correlation_id` | as in the audit record |
 | `tool`, `normalized` | the request after normalization: canonical paths, parsed argv, URL. Written content is a SHA-256 and a length, as in the audit log |
 | `decision`, `rule_id`, `rules_matched` | what the policy decided when it was recorded |
-| `tainted` | the request named or reached a protected path |
+| `tainted` | the session is tainted after this request: it, or an earlier call of the same session, named or reached a protected path or carried a secret value |
 | `sandbox_root`, `policy_sha256`, `self_protected` | provenance: the proposal refuses a trace from another sandbox, notes one recorded under another policy file, and keeps the recorder's own files (the policy, the audit log, the trace) protected when it replays |
 
 A `ran` record (`kind: "ran"`) has `v`, `mode`, `ts`, `host`, `host_tool`,

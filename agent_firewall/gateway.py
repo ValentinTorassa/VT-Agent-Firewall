@@ -11,7 +11,9 @@ Ordering invariants:
   afterwards (fail-closed). If the audit store cannot even be opened at
   startup, every request is denied with `fail-closed`.
 - Audit records keep a SHA-256 and length for written content and at most a
-  short preview of network bodies, unless verbose audit is enabled.
+  short preview of network bodies, unless verbose audit is enabled. A request
+  refused for carrying a secret value (`secret-egress`) keeps only the names
+  of its params, verbose or not.
 - `decide()` is the same pipeline without the executor, for an agent host that
   runs its own tools (the Claude Code / Codex hook). An allowed action gets a
   durable `delegated` record before the host may run it; the gateway never
@@ -216,8 +218,9 @@ class Gateway:
             "correlation_id": decision.request.correlation_id,
             "actor": decision.request.actor,
             "tool": decision.request.tool,
-            "spelled_params": self._audit_view(decision.request.tool,
-                                               decision.request.params),
+            "spelled_params": (_redacted(decision.request.params) if decision.redacted
+                               else self._audit_view(decision.request.tool,
+                                                     decision.request.params)),
             "normalized": self._audit_view(decision.request.tool,
                                            decision.normalized),
             "decision": decision.decision.value,
@@ -276,6 +279,12 @@ class Gateway:
             if not p.exists():
                 raise RuntimeError(f"protected path missing: {p}")
         ok.append(f"protected: {len(cfg.protected)} paths present")
+        if cfg.protected_names:
+            ok.append(f"protected names: {list(cfg.protected_names)}")
+        if cfg.secret_files:
+            # How many values, never which.
+            ok.append(f"secret files: {len(cfg.secret_files)} ({len(cfg.secrets)} "
+                      f"values never leave in a request)")
         for d in cfg.writable_dirs:
             if not d.is_dir():
                 raise RuntimeError(f"writable dir missing: {d}")
@@ -288,6 +297,14 @@ class Gateway:
             ok.append("network: deny_all")
         ok.append(f"mcp registry: {sorted(cfg.mcp_registry)}")
         return ok
+
+
+def _redacted(params) -> dict:
+    """What the audit keeps of a request that carries a secret value: which
+    params it had, none of what they held (a digest of a short secret could be
+    brute-forced from the log)."""
+    names = sorted(str(k) for k in params) if isinstance(params, dict) else []
+    return {"redacted": "the request carries a secret value", "params": names}
 
 
 def _digest(text: str) -> dict:

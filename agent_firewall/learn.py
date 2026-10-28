@@ -124,6 +124,8 @@ UNCHANGED_WHY = {
     "net-allowlist": "network.allow only covers GET and HEAD without a body to a URL "
                      "it can read unambiguously: this request is none of those",
     "taint-session": "the request names a protected path",
+    "secret-egress": "the request carried a value from a secret file: never relaxed, "
+                     "and nothing the session did afterwards is learned from",
     "sh-allowlist": "the first word is not a program a policy can name (VAR=value, "
                     "whitespace or a control character): the agent has to send the "
                     "command without it",
@@ -170,7 +172,8 @@ class TraceWriter:
 
     def observe(self, record: dict, tainted: bool = False) -> None:
         """`record` is the audit record of one decision; `tainted` says whether
-        the request named or reached a protected path."""
+        the session is tainted after it: this request or an earlier one named
+        or reached a protected path, or carried a secret value."""
         decision = record.get("decision")
         observation = {
             "v": TRACE_VERSION,
@@ -649,7 +652,10 @@ def propose(policy_path: str | Path, trace_paths, base_dir: str | Path | None = 
         if (before.decision, before.rule_id) != recorded and not refused:
             drifted += 1
         example = describe(obs)
-        if before.tainted and obs.session not in tainted_by:
+        # A secret value in a request is recorded redacted, so it cannot be
+        # replayed; the recorded refusal taints the session all the same.
+        leaked = obs.recorded[1] == "secret-egress"
+        if (before.tainted or leaked) and obs.session not in tainted_by:
             tainted_by[obs.session] = example
         clean = obs.session not in tainted_by
         # An ask is a yes only if the host then ran the call: without a `ran`
