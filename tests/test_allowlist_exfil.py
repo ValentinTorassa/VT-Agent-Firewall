@@ -13,6 +13,8 @@ first as it decides without the new rule (the leak) and then refused:
    egress.py checks, and taints the session. The audit log keeps no value.
 2. The list names `.env`, the secret is in `.env.local` or `api/.env`.
    `protected_names` protects a name wherever it appears under the sandbox.
+   And on macOS `cat .ENV` opened `.env`: protected paths and names now
+   compare without case.
 3. The hook forgot the session. Each hook call is a new process, so after a
    denied `Read .env` the next call, a fetch to an allowed origin or a
    `shell_ask` interpreter, was decided as if nothing had happened. The taint
@@ -349,6 +351,31 @@ class TestProtectedNames(ExfilBase):
             with self.subTest(bad=bad):
                 with self.assertRaises(ValueError):
                     Config.from_raw({**raw, "protected_names": bad}, self.tmp)
+
+
+class TestCaseInsensitiveFilesystems(ExfilBase):
+    """On macOS's default filesystem `cat .ENV` opens `.env`, and realpath keeps
+    the case it was given, so a literal comparison let the other spelling
+    through. Protected paths and names now compare without case."""
+
+    def test_before_another_case_was_another_path(self):
+        with mock.patch("agent_firewall.config._fold", str):
+            self.assertDecision(self.shell(self.engine(), "cat .ENV"), "allow", "sh-ok")
+
+    def test_another_case_is_the_same_protected_path(self):
+        engine = self.engine(protected_paths=["demo_workspace/.env",
+                                              "demo_workspace/canary"],
+                             protected_names=[".env.*"])
+        for tool, params, rule in [
+                ("shell.run", {"command_line": "cat .ENV"}, "sh-paths"),
+                ("fs.read", {"path": ".Env"}, "fs-protected"),
+                ("fs.read", {"path": "CANARY/must-remain.txt"}, "fs-protected"),
+                ("fs.write", {"path": "Canary/x", "content": "x"}, "fs-protected"),
+                ("fs.read", {"path": "api/.ENV.LOCAL"}, "fs-protected")]:
+            with self.subTest(params=params):
+                self.assertDecision(self.request(engine, tool, params), "block", rule)
+        self.assertDecision(self.decide(engine, "fs.read", path="normal/notes.txt"),
+                            "allow", "fs-read-ok")
 
 
 class TestHookRemembersTheSession(HookTestBase):

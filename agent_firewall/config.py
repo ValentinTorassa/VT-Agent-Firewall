@@ -205,9 +205,16 @@ class Config:
         """A protected entry covers itself and everything below it, so a
         protected directory cannot be read file by file. A name on
         `protected_names` covers every file or directory with that name, and
-        everything below it."""
-        if any(p == resolved or p in resolved.parents for p in self.protected):
-            return True
+        everything below it.
+
+        Both compare without case. realpath keeps the case it was given, and
+        on a case-insensitive filesystem (macOS by default) `cat .ENV` opens
+        `.env`; on a case-sensitive one this also protects `.ENV`."""
+        folded = _fold(resolved)
+        for p in self.protected:
+            entry = _fold(p)
+            if folded == entry or folded.startswith(entry.rstrip("/") + "/"):
+                return True
         return bool(self.protected_names) and self.name_protected(resolved) is not None
 
     def name_protected(self, resolved: Path) -> str | None:
@@ -220,7 +227,7 @@ class Config:
             parts = resolved.parts
         for part in parts:
             for pattern in self.protected_names:
-                if fnmatchcase(part, pattern):
+                if fnmatchcase(part.casefold(), pattern.casefold()):
                     return pattern
         return None
 
@@ -235,6 +242,10 @@ class Config:
 
     def in_writable(self, resolved: Path) -> bool:
         return any(d == resolved or d in resolved.parents for d in self.writable_dirs)
+
+
+def _fold(path: Path) -> str:
+    return str(path).casefold()
 
 
 PIN = re.compile(r"[0-9a-fA-F]{64}")
