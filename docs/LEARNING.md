@@ -239,16 +239,18 @@ In short:
 | a web page | `network.allow`, your decision | where data goes is the exfiltration question |
 | an MCP tool | `mcp_registry`, your decision | the firewall checks its paths, not what it does |
 
-**Unchanged.** Learning never relaxes `fs-protected`, `fs-sandbox`, `sh-paths`,
-`sh-recursive`, `sh-args`, `sh-syntax`, `net-deny-all`, `net-allowlist` or
-`unknown-tool`, and copies `sandbox_root`, `protected_paths`,
-`shell_forbidden_args`, `shell_exact`, `network`, `mcp_registry` and `apis`
-unchanged (`--drop-unused` aside).
+**Unchanged.** Learning never relaxes `secret-egress`, `fs-protected`,
+`fs-sandbox`, `sh-paths`, `sh-recursive`, `sh-args`, `sh-syntax`,
+`net-deny-all`, `net-allowlist` or `unknown-tool`, and copies `sandbox_root`,
+`protected_paths`, `protected_names`, `secret_files`, `shell_forbidden_args`,
+`shell_exact`, `network`, `mcp_registry` and `apis` unchanged (`--drop-unused`
+aside).
 
 **Not learned from.** An observation is not evidence for a grant when:
 
-- its session had already named or reached a protected path: that session may
-  be following an injection;
+- its session had already named or reached a protected path, or sent a value
+  from `secret_files` (`secret-egress`, recorded without its params, so it is
+  never replayed): that session may be following an injection;
 - it was refused at approval (`approval-denied`: a human said no, a timeout, or a
   host that cannot ask). A no is never learned as a yes;
 - it was an ask (`fs-write-scope`, `sh-ask`, or `learn-ask` in ask mode) and no

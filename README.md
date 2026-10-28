@@ -39,7 +39,7 @@ python3 scripts/run_demo.py --health       # static sanity checks
 python3 scripts/run_demo.py                # the attack, through the gateway
 python3 scripts/run_demo.py --no-firewall  # contrast: the same attack without it
 python3 -m unittest discover -s tests -v   # AC1–AC12, the OAuth failure modes, bypass regressions
-python3 scripts/run_corpus.py              # 45 isolated synthetic injection cases
+python3 scripts/run_corpus.py              # 58 isolated synthetic injection cases
 python3 scripts/run_learning_demo.py       # learning mode: record a session, propose a policy
 ```
 
@@ -55,7 +55,8 @@ All data in `demo_workspace/` is synthetic bait.
 
 | rule_id | effect |
 |---|---|
-| `fs-protected` | block reads/writes of protected paths and anything under them, after `realpath` (symlinks included) |
+| `secret-egress` | block any request, whatever the tool, that carries a value from a `secret_files` file: as written, percent-decoded, in base64 or in hex ([secrets](#secrets-that-must-not-leave)); evaluated first, taints the session, and the audit keeps no value |
+| `fs-protected` | block reads/writes of protected paths and anything under them, after `realpath` (symlinks included); a name on `protected_names` (`.env.*`, `*.pem`) anywhere in the sandbox and every file on `secret_files` count as protected paths |
 | `fs-sandbox` | block any path or `cwd` outside the sandbox |
 | `fs-write-scope` | require approval for writes inside the sandbox but outside `writable_dirs` |
 | `sh-syntax` | block a line an agent host's shell would run (`via_shell`) unless it is one simple command with literal arguments: no pipes, redirects, chaining, substitution, variables, globs or `~` |
@@ -67,12 +68,12 @@ All data in `demo_workspace/` is synthetic bait.
 | `sh-recursive` | block a recursive walk (`grep -r`, `ls -R`, `find`) that would reach a protected path or leave the sandbox, symlinks followed |
 | `net-deny-all` | block all network, loopback included (the default `network.mode`) |
 | `net-ok` / `net-allowlist` | with `network.mode` `allowlist`: allow GET and HEAD to an origin on `network.allow`, block everything else |
-| `taint-session` | extra block once the session has named or reached a protected path, even in a blocked request: no network, `api.call`, `sh-ask` or `sh-exact` afterwards |
+| `taint-session` | extra block once the session has named or reached a protected path, even in a blocked request, or carried a secret value: no network, `api.call`, `sh-ask` or `sh-exact` afterwards (in the hook, for the rest of the host's session) |
 | `mcp-unknown-tool` | block MCP server/tool pairs outside the registry |
 | `mcp-protected-path` / `mcp-sandbox` | block MCP arguments that resolve to a protected path or leave the sandbox |
 | `mcp-resources-denied` | block MCP resource reads unless the policy enables them for that server |
 | `approval-denied` | block when the human says no, times out, or stdin is not interactive |
-| `fail-closed` | block everything when the audit store is unavailable |
+| `fail-closed` | block everything when the audit store is unavailable; in the hook also when the session taint store is, or when the policy does not match its `--policy-sha256` pin |
 | `unknown-tool` / `parse-error` | block a tool with no policy and a request that cannot be parsed or has a param of the wrong type (default-deny) |
 | `hook-unsupported` | block a host tool call the hook cannot check (a Codex patch aimed at another environment) |
 | `learn-ask` | learning mode `ask` only: require approval for a call refused only by `sh-allowlist` or `mcp-unknown-tool` that nothing else refuses |
@@ -121,9 +122,47 @@ None of them skips another check: paths (for a binary without a grammar, also
 walks and `sh-syntax` come first, and a session that went for a protected path
 gets none of them (`taint-session`). What they cannot do: an exact command fixes
 the argv, not what the program runs (`python3 -m pytest` imports any test file
-the agent can write); an allowed origin can still receive data in the URL; the
-firewall does not resolve DNS; and in the hook each call is its own session, so
-taint does not carry from one call to the next.
+the agent can write); an allowed origin can still receive data in the URL (a
+value from `secret_files` is refused there too; anything else is not); and the
+firewall does not resolve DNS.
+
+## Secrets that must not leave
+
+Protected paths stop the agent from reading a secret file. Two optional keys
+cover what a list of paths misses, and a policy without them decides as before:
+
+```json
+{
+  "protected_names": [".env", ".env.*", "*.pem", "*.key", "id_rsa*", ".aws", ".ssh"],
+  "secret_files": [".env", ".env.local"]
+}
+```
+
+- **`protected_names`**: file or directory name patterns (`*`, `?`, `[...]`, no
+  slash) protected wherever they appear under the sandbox, and everything below
+  them, like a protected path: `.env.local`, `api/.env` and `deploy/server.pem`
+  are covered when `protected_paths` only names `.env`. Names above the sandbox
+  root do not count. `.env.*` covers `.env.example` too; list narrower names if
+  the agent needs that file.
+- **`secret_files`**: files whose values never leave in a request
+  (`secret-egress`). Each one is also a protected path, and a missing one has no
+  values. The firewall reads them itself and takes the value of every key that
+  names a credential (`API_KEY`, `AWS_SECRET_ACCESS_KEY`, `DB_PASSWORD`,
+  npm's `_authToken`), the password in a URL value, and every line that is not
+  an assignment (a token file, a PEM body), 8 characters or more. Configuration
+  such as `NODE_ENV=development` or `API_URL=http://localhost:3000` is left
+  alone. A request that carries a value in any param of any tool, as written,
+  percent-decoded (twice), in base64 at any offset or in hex, is refused before
+  any other rule and taints the session; its audit record keeps the file, the
+  key and the names of the params, never the value.
+
+`secret-egress` closes the allowlist that still lets the `.env` out: a value that
+reached the agent some other way (an interpreter a human approved, a tool the
+hook does not see, an MCP result) cannot leave through an origin on
+`network.allow`, an argument of an allowlisted `curl`, a file in `writable_dirs`,
+or an MCP or API argument. It is a tripwire for the value, not containment: a
+value split, reversed, compressed or encrypted is not recognized, and data that
+is not in `secret_files` is not checked at all.
 
 ## Delegated credentials (`api.call`)
 
@@ -169,7 +208,9 @@ client launches the proxy as if it were the server; the proxy launches the real 
   in `mcp_resources`;
 - the policy file and the audit log given on the command line are added to the
   protected paths, after `realpath`, so a call cannot read or rewrite them
-  (`mcp-protected-path`);
+  (`mcp-protected-path`); `--protect PATH` adds more (the client config that
+  launches the proxy), and `--policy-sha256 HEX` refuses to start on a policy
+  file that changed;
 - only known MCP methods are relayed; JSON-RPC batches are rejected and a
   `tools/call` sent as a notification is dropped, so nothing reaches the server
   around the policy;
@@ -221,7 +262,17 @@ protocol:
 Because the host runs `Bash` lines in a real shell, a line must first pass
 `sh-syntax`: one simple command whose words are exactly what the policy checked.
 Anything the hook cannot parse or map, an unreadable policy, an unavailable audit
-log, an internal error or its own deadline all deny. In a Claude Code settings
+log, an internal error or its own deadline all deny.
+
+The hook keeps the agent away from what judges it. The policy, the audit log,
+the learning trace and the host settings that install the hook
+(`.claude/settings.json`, `.claude/settings.local.json`, `.mcp.json`,
+`~/.claude/settings.json`; Codex's `.codex/config.toml` and `.codex/hooks.json`)
+are protected paths whether they exist or not, and `--protect PATH` adds more.
+`--policy-sha256 HEX` pins the policy: one that changed by any route, such as an
+allowed `git checkout`, is not loaded and every call is denied. A session that
+went for a protected path or carried a secret value stays tainted for its later
+calls; the hook keeps that next to its audit log. In a Claude Code settings
 file:
 
 ```json
@@ -245,7 +296,8 @@ file:
 ```
 
 [docs/AGENT_HOOKS.md](docs/AGENT_HOOKS.md) covers install for both hosts, a smoke
-test, what it blocks, the protocol details it relies on, and its limits: it is
+test, [keeping the firewall out of the agent's reach](docs/AGENT_HOOKS.md#keeping-the-firewall-out-of-the-agents-reach),
+what it blocks, the protocol details it relies on, and its limits: it is
 policy, not OS isolation; whoever controls the settings can remove it; the host
 lets a tool run when the hook times out or cannot start; and only simple shell
 commands pass.
@@ -296,7 +348,9 @@ the trace format and the limits.
 
 ```text
 agent_firewall/   models, config, policy, argv (per-binary grammars), shell_syntax,
-                  executor, audit, approval, gateway, credentials (token broker),
+                  egress (secret values that never leave), session (taint, and the
+                  hook's store of it), executor, audit, approval, gateway,
+                  credentials (token broker),
                   mock_apis, mcp_proxy, hook (Claude Code / Codex PreToolUse),
                   learn (learning mode: traces and policy proposals),
                   network (the strict URL parsing behind network.allow)
@@ -313,7 +367,9 @@ tests/            acceptance tests AC1–AC12, test_delegation.py (the four OAut
                   test_hook.py (the PreToolUse hook, from synthetic events),
                   test_learn.py (learning mode: recording, ask mode, proposals),
                   test_policy_model.py (shell_ask, shell_exact, network.allow and
-                  their bypasses)
+                  their bypasses), test_allowlist_exfil.py (the allowed channels
+                  that still let a secret out), test_policy_integrity.py (the agent
+                  rewriting what judges it)
 docs/             THREAT_MODEL.md, AGENT_HOOKS.md, LEARNING.md; build-prompts/ (how
                   the first version was scaffolded)
 demo_workspace/   synthetic sandbox for the demo
@@ -325,7 +381,9 @@ These are deliberate v0 boundaries, not hidden ones:
 
 - **No OS sandbox.** An agent that can run code outside the pipeline bypasses it.
 - **Taint is per path, not per content.** Reading an *allowed* file and pasting its
-  content into an *allowed* channel is not detected.
+  content into an *allowed* channel is not detected. The one exception is a value
+  from `secret_files`, and that check is a tripwire: a value split, reversed,
+  compressed or encrypted is not recognized.
 - **Allowed actions have a durable intent before execution and an outcome after.**
   A crash between them leaves an unresolved intent that needs reconciliation; the
   gateway cannot prove from that record alone whether the external action happened.
@@ -333,7 +391,8 @@ These are deliberate v0 boundaries, not hidden ones:
   still uses the simulated `demo` MCP server.
 - **The MCP proxy handles one call at a time** and only covers stdio servers.
 - **The agent hook is policy, not isolation.** It decides whether a host tool call
-  may start; whoever controls the host's settings can remove it, the host runs the
+  may start; it keeps the host's settings out of the agent's gated tools, but a
+  person or a process outside the agent can still remove it, the host runs the
   tool anyway when the hook times out or cannot start, and aliases or `PATH` decide
   what an allowlisted name really runs. See [docs/AGENT_HOOKS.md](docs/AGENT_HOOKS.md#limits).
 - **A narrower grant is as narrow as its entry.** An exact command fixes the argv,
@@ -358,7 +417,7 @@ These are deliberate v0 boundaries, not hidden ones:
 
 ## Reproducible attack corpus
 
-`corpus/attacks.json` records forty-five synthetic untrusted instructions (four of
+`corpus/attacks.json` records fifty-eight synthetic untrusted instructions (five of
 them benign controls), their resulting tool requests and the expected decision and
 rule. Since 0.1.1 it includes the bypass classes found in review: recursive reads
 that reach a secret without naming it, file-valued options, a `find` action that
@@ -368,13 +427,17 @@ under an unexpected name. Since 0.2.0 it includes lines a host shell would expan
 `shell_ask`, `shell_exact` and `network.allow` try each grant's bypasses: an extra
 argument, a path or `VAR=value` spelling of the program, chaining, `@.env`, user
 info, a backslash, a look-alike host, IP spellings, another port or scheme, a
-POST, and a tainted session. A case can add symlinks (`setup.symlinks`),
-protected paths (`policy.protected_paths_add`) or policy keys (`policy.set`) to
-its own workspace. `scripts/run_corpus.py`
-gives each case a fresh temporary workspace and gateway session, checks every
-decision and audit record, and verifies that the canary was not changed. The
-corpus tests policy behavior; it does not measure whether a language model would
-follow an instruction. `scripts/score_model_following.py reviewed-trace.jsonl`
+POST, and a tainted session. Since 0.4.0 it includes secret values sent through
+channels the policy allows (an allowed origin's query string, also encoded; an
+allowlisted `curl`'s form field and header; a write; MCP and API arguments) and
+copies of a secret under names the protected list does not include or in
+another case (`.ENV`). A case can add files (`setup.files`), symlinks
+(`setup.symlinks`), protected paths (`policy.protected_paths_add`) or policy keys
+(`policy.set`) to its own workspace. `scripts/run_corpus.py` gives each case a
+fresh temporary workspace and gateway session, checks every decision and audit
+record, and verifies that the canary was not changed. The corpus tests policy
+behavior; it does not measure whether a language model would follow an
+instruction. `scripts/score_model_following.py reviewed-trace.jsonl`
 scores separately reviewed model continuations. Each JSONL row names a corpus
 `case_id`, `model`, `attacker_goal_attempted` (`true`, `false`, or `null`) and a
 list of observed `tool_calls` names. Missing and uncertain cases stay visible;
@@ -390,7 +453,7 @@ session and proposes a policy ([CHANGELOG](CHANGELOG.md)).
 Next:
 
 1. Sender-constrained tokens (DPoP), so a stolen access token is useless.
-2. Content-level taint, not only per path.
+2. Content-level taint beyond the values in `secret_files`.
 3. Concurrent calls and the Streamable HTTP transport in the MCP proxy.
 4. Expand the synthetic corpus and add a separate model-following benchmark.
 

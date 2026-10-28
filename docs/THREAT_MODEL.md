@@ -19,9 +19,9 @@ the one this project owns.
 ```text
  untrusted                          │ trusted
  ───────────────────────────────────┼──────────────────────────────────────────
- model output, spelled params,      │ normalized params, policy file,
+ model output, spelled params,      │ normalized params, policy file (pinned),
  content the agent reads,           │ human approval on the terminal,
- MCP server results, tools/list,    │ audit log (outside the sandbox), executor,
+ MCP server results, tools/list,    │ audit log and taint store, executor,
  host tool calls (hook stdin)       │ the host's settings that install the hook
 ```
 
@@ -29,7 +29,11 @@ Spelled parameters never cross the boundary: the executor only receives what the
 normalizer produced and the policy approved. With the agent hook the host, not the
 executor, runs the tool, so the guarantee is weaker: the hook can only refuse what
 it cannot vouch for, and it trusts the host to honor the answer and to keep the
-hook installed (see [docs/AGENT_HOOKS.md](AGENT_HOOKS.md#limits)).
+hook installed (see [docs/AGENT_HOOKS.md](AGENT_HOOKS.md#limits)). Everything on
+the trusted side that lives on disk (the policy, the audit log and taint store,
+the learning trace, the host settings) is a protected path for the agent's own
+tools, and the policy can be pinned by digest, so the agent cannot move the
+boundary it is judged by.
 
 ## Attacker capabilities considered
 
@@ -50,6 +54,16 @@ hook installed (see [docs/AGENT_HOOKS.md](AGENT_HOOKS.md#limits)).
    braces and `~` would change what runs after the argv was checked; patches that
    name files under a misleading spelling; and malformed hook input meant to make
    the hook crash (a crash would let the host run the tool).
+10. Exfiltration through what the policy allows: a secret value in the query
+    string of an allowed origin (as written or encoded), in an argument of an
+    allowlisted binary, in a file the agent may write, or in an MCP or API
+    argument; a copy of a secret under a name the protected list does not
+    include (`.env.local`, `api/.env`); and, in the hook, the call after a denied
+    one, which used to start from a clean session.
+11. The agent rewriting what judges it: the host settings that install the hook
+    (`disableAllHooks`, another `--policy`, an MCP server without the proxy) and
+    a policy file changed by a route the hook does not see (an allowed
+    `git checkout`, a test runner, a tool that is not matched).
 
 ## Mapping to OWASP
 
@@ -61,7 +75,7 @@ Status: **Implemented** (covered by tests or the demo), **Partial**, **Planned**
 | Risk | How the gateway addresses it | Status |
 |---|---|---|
 | LLM01 Prompt Injection | Containment, not detection: default-deny policy, protected paths, network deny, taint. The demo is an indirect injection. | Implemented (containment) |
-| LLM02 Sensitive Information Disclosure | Protected paths, and everything under them, blocked after `realpath`: named directly, through an option value, or reached by a recursive walk (symlinks followed). Naming or reaching one, blocked or not, taints the session, and every network and API action is blocked afterwards, as are the `shell_ask` and `shell_exact` grants. A network allowlist, when the policy has one, admits only GET and HEAD to listed origins and refuses URLs two parsers could read differently. | Partial (path-level taint) |
+| LLM02 Sensitive Information Disclosure | Protected paths, and everything under them, blocked after `realpath`: named directly, through an option value, or reached by a recursive walk (symlinks followed); `protected_names` protects a name (`.env.*`, `*.pem`) wherever it appears in the sandbox. Naming or reaching one, blocked or not, taints the session (in the hook, for the rest of the host's session), and every network and API action is blocked afterwards, as are the `shell_ask` and `shell_exact` grants. A value from `secret_files` is refused in any request, raw or percent-, base64- or hex-encoded (`secret-egress`). A network allowlist, when the policy has one, admits only GET and HEAD to listed origins and refuses URLs two parsers could read differently. | Partial (path-level taint; value tripwire for `secret_files`) |
 | LLM03 Supply Chain | MCP registry (unlisted tools are hidden and blocked) and `--pin PATH=SHA256` for the server's code. | Partial |
 | LLM05 Improper Output Handling | Model output never reaches a shell: `shlex` to argv, `shell=False`, executor sees normalized params only. | Implemented |
 | LLM06 Excessive Agency | Default-deny per tool, shell allowlist with a per-binary argument grammar, approval for out-of-scope writes, per-call tokens scoped to one audience and operation. | Implemented |
@@ -81,7 +95,7 @@ Status: **Implemented** (covered by tests or the demo), **Partial**, **Planned**
 | ASI07 Insecure Inter-Agent Communication | Single agent only. | Out of scope |
 | ASI08 Cascading Failures | Fail-closed: a parser error denies; an audit failure poisons the gateway and denies everything afterwards. | Partial |
 | ASI09 Human-Agent Trust Exploitation | The approval prompt shows the normalized action, never the agent's description; timeout or non-interactive stdin denies. | Implemented |
-| ASI10 Rogue Agents | Append-only audit of every decision; no behavioral detection. | Partial |
+| ASI10 Rogue Agents | Append-only audit of every decision. The agent cannot rewrite the policy, the audit log, the taint store or the host settings that install the hook through its own tools, and a pinned policy that changed by any other route is not loaded. No behavioral detection. | Partial |
 
 ## Delegated credentials: the four failure modes
 
@@ -104,7 +118,18 @@ attack works, and the same attack stopped by the gateway and the broker.
 
 - No OS-level sandbox: code executed outside the pipeline bypasses it.
 - Taint is per path, not per content: an allowed read pasted into an allowed channel
-  is not detected.
+  is not detected. The exception is a value from `secret_files`, and that check is
+  a tripwire, not containment: it recognizes the value as written, percent-decoded
+  twice, in base64 at any offset and in hex; split, reversed, compressed,
+  encrypted or otherwise encoded, it does not. It only knows values under keys
+  that name a credential, URL passwords and lines that are not assignments, of 8
+  characters or more: a secret under a key such as `API_URL`, or a short one, is
+  not recognized.
+- Protected paths and `protected_names` compare without case: realpath keeps the
+  case it was given, and a case-insensitive filesystem (macOS by default) opens
+  `.env` for `cat .ENV`. On a case-sensitive one that also protects `.ENV`. The
+  sandbox and writable checks still compare as written, so another spelling of
+  an allowed directory is refused or asked about, never allowed.
 - Allowed actions get a durable intent record before execution and an outcome
   after. A crash in between leaves an unresolved intent: the record alone cannot
   prove whether the external action happened, and nothing reconciles it yet.
@@ -150,6 +175,10 @@ attack works, and the same attack stopped by the gateway and the broker.
   it, and the host runs the tool when the hook times out or cannot start; only the
   hook's own failures after it starts are fail-closed. Aliases, shell functions and
   `PATH` decide what an allowlisted name runs. Codex gives the hook the session
-  `cwd`, not a command's `workdir`. Each hook call is its own session, so taint does
-  not carry across calls, and the audit records a request for approval, not the
-  human's answer. Details: [docs/AGENT_HOOKS.md](AGENT_HOOKS.md#limits).
+  `cwd`, not a command's `workdir`. Taint carries across hook calls by the host's
+  `session_id`, so a call without one starts clean, and the audit records a
+  request for approval, not the human's answer. The hook protects the host
+  settings that install it from the agent's gated tools; a tool that is not
+  matched, or a process outside the agent, can still change them, and a policy
+  pin (`--policy-sha256`) is only as safe as the settings file that holds it.
+  Details: [docs/AGENT_HOOKS.md](AGENT_HOOKS.md#limits).

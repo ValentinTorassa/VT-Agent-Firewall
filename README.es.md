@@ -53,7 +53,7 @@ python3 scripts/run_demo.py --health       # chequeos estáticos de sanidad
 python3 scripts/run_demo.py                # el ataque, a través del gateway
 python3 scripts/run_demo.py --no-firewall  # contraste: el mismo ataque sin el gateway
 python3 -m unittest discover -s tests -v   # AC1–AC12, los modos de falla de OAuth, regresiones de bypass
-python3 scripts/run_corpus.py              # 45 casos sintéticos de inyección, aislados
+python3 scripts/run_corpus.py              # 58 casos sintéticos de inyección, aislados
 python3 scripts/run_learning_demo.py       # modo aprendizaje: registra una sesión, propone una política
 python3 scripts/run_demo.py --reset        # trunca logs/audit.jsonl y restaura el canary
 ```
@@ -70,7 +70,8 @@ datos de `demo_workspace/` son carnada sintética.
 
 | rule_id | efecto |
 |---|---|
-| `fs-protected` | block: `.env`, `fake_credentials.txt` y todo lo que esté debajo de un path protegido (post-realpath, symlinks incluidos) |
+| `secret-egress` | block: cualquier pedido, sea cual sea la herramienta, que lleve un valor de un archivo de `secret_files`: tal cual, decodificado de porcentaje, en base64 o en hex ([secretos](#secretos-que-no-pueden-salir)); se evalúa primero, marca la sesión y el audit no guarda el valor |
+| `fs-protected` | block: `.env`, `fake_credentials.txt` y todo lo que esté debajo de un path protegido (post-realpath, symlinks incluidos); un nombre de `protected_names` (`.env.*`, `*.pem`) en cualquier lugar del sandbox y cada archivo de `secret_files` cuentan como paths protegidos |
 | `fs-sandbox` | block: cualquier path o `cwd` fuera de `demo_workspace/` |
 | `fs-write-scope` | require_approval: escritura dentro del sandbox pero fuera de `writable_dirs` |
 | `sh-syntax` | block: una línea que va a correr el shell de un host (`via_shell`) y no es un único comando simple con argumentos literales: sin pipes, redirecciones, encadenamiento, sustitución, variables, globs ni `~` |
@@ -82,12 +83,12 @@ datos de `demo_workspace/` son carnada sintética.
 | `sh-recursive` | block: un recorrido recursivo (`grep -r`, `ls -R`, `find`) llegaría a un path protegido o saldría del sandbox, siguiendo symlinks |
 | `net-deny-all` | block: red deny-total, sin excepciones (ni loopback); es el `network.mode` por defecto |
 | `net-ok` / `net-allowlist` | con `network.mode` `allowlist`: allow para GET y HEAD a un origen de `network.allow`, block para todo lo demás |
-| `taint-session` | block adicional: la sesión nombró o alcanzó un path protegido, aunque ese pedido se haya bloqueado; después no hay red, `api.call`, `sh-ask` ni `sh-exact` |
+| `taint-session` | block adicional: la sesión nombró o alcanzó un path protegido, aunque ese pedido se haya bloqueado, o llevó un valor secreto; después no hay red, `api.call`, `sh-ask` ni `sh-exact` (en el hook, por el resto de la sesión del host) |
 | `mcp-unknown-tool` | block: server/tool MCP fuera del registry |
 | `mcp-protected-path` / `mcp-sandbox` | block: un argumento MCP resuelve a un path protegido o fuera del sandbox |
 | `mcp-resources-denied` | block: lectura de resources MCP, salvo que la política la habilite para ese server |
 | `approval-denied` | block: el humano dice que no, se vence el timeout o stdin no es interactivo |
-| `fail-closed` | block: todo, cuando el audit store no está disponible |
+| `fail-closed` | block: todo, cuando el audit store no está disponible; en el hook también cuando no lo está el registro de taint de las sesiones o cuando la política no coincide con su pin `--policy-sha256` |
 | `unknown-tool` / `parse-error` | block: una herramienta sin política y un pedido que no se puede parsear (default-deny) |
 | `hook-unsupported` | block: una llamada del host que el hook no puede chequear (un patch de Codex para otro environment) |
 | `learn-ask` | require_approval, sólo en el modo aprendizaje `ask`: una llamada rechazada únicamente por `sh-allowlist` o `mcp-unknown-tool` que nada más rechaza |
@@ -139,9 +140,50 @@ prohibidas, los recorridos recursivos y `sh-syntax` van primero, y una sesión q
 fue por un path protegido no recibe ninguno (`taint-session`). Lo que no pueden
 hacer: un comando exacto fija el argv, no lo que corre el programa
 (`python3 -m pytest` importa cualquier archivo de tests que el agente pueda
-escribir); un origen permitido puede recibir datos en la misma URL; el firewall
-no resuelve DNS; y en el hook cada llamada es su propia sesión, así que el taint
-no pasa de una llamada a la siguiente.
+escribir); un origen permitido puede recibir datos en la misma URL (un valor de
+`secret_files` se rechaza también ahí; cualquier otro dato no); y el firewall no
+resuelve DNS.
+
+## Secretos que no pueden salir
+
+Los paths protegidos impiden que el agente lea un archivo con secretos. Dos claves
+opcionales cubren lo que una lista de paths no ve, y una política sin ellas decide
+igual que antes:
+
+```json
+{
+  "protected_names": [".env", ".env.*", "*.pem", "*.key", "id_rsa*", ".aws", ".ssh"],
+  "secret_files": [".env", ".env.local"]
+}
+```
+
+- **`protected_names`**: patrones de nombre de archivo o directorio (`*`, `?`,
+  `[...]`, sin barra) protegidos donde sea que aparezcan debajo del sandbox, con
+  todo lo que tengan adentro, igual que un path protegido: `.env.local`,
+  `api/.env` y `deploy/server.pem` quedan cubiertos aunque `protected_paths` sólo
+  nombre `.env`. Los nombres por encima de la raíz del sandbox no cuentan.
+  `.env.*` también cubre `.env.example`; listá nombres más acotados si el agente
+  necesita ese archivo.
+- **`secret_files`**: archivos cuyos valores nunca salen en un pedido
+  (`secret-egress`). Cada uno es además un path protegido, y uno que no existe no
+  tiene valores. El firewall los lee él mismo y toma el valor de cada clave que
+  nombra una credencial (`API_KEY`, `AWS_SECRET_ACCESS_KEY`, `DB_PASSWORD`, el
+  `_authToken` de npm), la contraseña de un valor que es una URL y cada línea que
+  no es una asignación (un archivo de token, el cuerpo de un PEM), de 8
+  caracteres o más. La configuración como `NODE_ENV=development` o
+  `API_URL=http://localhost:3000` queda afuera. Un pedido que lleve un valor en
+  cualquier param de cualquier herramienta, tal cual, decodificado de porcentaje
+  (dos veces), en base64 en cualquier posición o en hex, se rechaza antes que
+  cualquier otra regla y marca la sesión; su registro de auditoría guarda el
+  archivo, la clave y los nombres de los params, nunca el valor.
+
+`secret-egress` cierra la allowlist que igual deja salir el `.env`: un valor que
+le llegó al agente por otro lado (un intérprete que aprobó una persona, una
+herramienta que el hook no ve, un resultado de MCP) no puede salir por un origen
+de `network.allow`, un argumento de un `curl` permitido, un archivo de
+`writable_dirs` ni un argumento de MCP o de API. Es un cable trampa para el
+valor, no contención: un valor partido, invertido, comprimido o cifrado no se
+reconoce, y lo que no está en `secret_files` no se chequea.
 
 ## Credenciales delegadas (`api.call`)
 
@@ -187,6 +229,11 @@ stdio. El cliente lanza el proxy como si fuera el servidor; el proxy lanza el re
   incluidos. Una ruta fuera del sandbox se bloquea, no sólo una protegida;
 - `resources/read` pasa por la política y se deniega salvo que el servidor esté en
   `mcp_resources`;
+- el archivo de política y el log de auditoría que se pasan por línea de comandos
+  se suman a los paths protegidos, después de `realpath`, así que una llamada no
+  puede leerlos ni reescribirlos (`mcp-protected-path`); `--protect RUTA` suma
+  más (la config del cliente que lanza el proxy), y `--policy-sha256 HEX` no
+  arranca con un archivo de política que cambió;
 - sólo se reenvían métodos MCP conocidos; los batches JSON-RPC se rechazan y un
   `tools/call` mandado como notificación se descarta, así que nada llega al servidor
   por fuera de la política;
@@ -240,7 +287,18 @@ Como el host corre las líneas de `Bash` en un shell de verdad, cada línea prim
 tiene que pasar `sh-syntax`: un único comando simple cuyas palabras son exactamente
 las que chequeó la política. Todo lo que el hook no puede parsear o mapear, una
 política ilegible, un audit log no disponible, un error interno o su propio deadline
-terminan en deny. En un archivo de settings de Claude Code:
+terminan en deny.
+
+El hook mantiene al agente lejos de lo que lo juzga. La política, el audit log, la
+traza de aprendizaje y los settings del host que instalan el hook
+(`.claude/settings.json`, `.claude/settings.local.json`, `.mcp.json`,
+`~/.claude/settings.json`; `.codex/config.toml` y `.codex/hooks.json` de Codex)
+son paths protegidos existan o no, y `--protect RUTA` suma más.
+`--policy-sha256 HEX` fija la política: una que cambió por cualquier camino, como
+un `git checkout` permitido, no se carga y se deniega cada llamada. Una sesión que
+fue por un path protegido o llevó un valor secreto queda marcada para sus
+llamadas siguientes; el hook lo guarda al lado de su audit log. En un archivo de
+settings de Claude Code:
 
 ```json
 {
@@ -263,8 +321,8 @@ terminan en deny. En un archivo de settings de Claude Code:
 ```
 
 [docs/AGENT_HOOKS.md](docs/AGENT_HOOKS.md) (en inglés) cubre la instalación en los
-dos hosts, un smoke test, qué bloquea, los detalles del protocolo en los que se apoya
-y sus límites: es política, no aislamiento del sistema operativo; quien controla los
+dos hosts, un smoke test, [cómo dejar el firewall fuera del alcance del agente](docs/AGENT_HOOKS.md#keeping-the-firewall-out-of-the-agents-reach),
+qué bloquea, los detalles del protocolo en los que se apoya y sus límites: es política, no aislamiento del sistema operativo; quien controla los
 settings puede sacarlo; el host deja correr la herramienta si el hook se pasa del
 timeout o no arranca; y sólo pasan comandos de shell simples.
 
@@ -316,7 +374,9 @@ python3 scripts/run_learning_demo.py   # el circuito completo sobre demo_workspa
 
 ```text
 agent_firewall/   models, config, policy, argv (gramáticas por binario), shell_syntax,
-                  executor, audit, approval, gateway, credentials (token broker),
+                  egress (valores secretos que nunca salen), session (taint, y el
+                  registro que guarda el hook), executor, audit, approval, gateway,
+                  credentials (token broker),
                   mock_apis, mcp_proxy, hook (PreToolUse de Claude Code / Codex),
                   learn (modo aprendizaje: trazas y propuestas de política),
                   network (el parseo estricto de URLs detrás de network.allow)
@@ -333,7 +393,9 @@ tests/            tests de aceptación AC1–AC12, test_delegation.py (los cuatr
                   como regresión), test_hook.py (el hook PreToolUse, con eventos
                   sintéticos), test_learn.py (modo aprendizaje: registro, modo ask,
                   propuestas), test_policy_model.py (shell_ask, shell_exact,
-                  network.allow y sus bypasses)
+                  network.allow y sus bypasses), test_allowlist_exfil.py (los
+                  canales permitidos que igual dejaban salir un secreto),
+                  test_policy_integrity.py (el agente reescribiendo lo que lo juzga)
 logs/             audit.jsonl (fuera del sandbox, append-only)
 docs/             THREAT_MODEL.md, AGENT_HOOKS.md, LEARNING.md; build-prompts/ (cómo
                   se armó la primera versión)
@@ -347,7 +409,9 @@ Son límites deliberados de la v0, no ocultos:
 - **Sin sandbox de OS.** Un agente que puede ejecutar código fuera del pipeline lo
   saltea.
 - **El taint es por path, no por contenido.** Leer un archivo *permitido* y pegar su
-  contenido en un canal *permitido* no se detecta.
+  contenido en un canal *permitido* no se detecta. La única excepción es un valor de
+  `secret_files`, y ese chequeo es un cable trampa: un valor partido, invertido,
+  comprimido o cifrado no se reconoce.
 - **Las acciones permitidas dejan un intento durable antes de ejecutarse y un
   resultado después.** Un crash entre ambos deja un intento sin resolver que hay que
   conciliar; con ese registro solo, el gateway no puede probar si la acción externa
@@ -356,7 +420,8 @@ Son límites deliberados de la v0, no ocultos:
   la demo sigue usando el servidor MCP `demo` simulado.
 - **El proxy MCP atiende una llamada a la vez** y sólo cubre servidores por stdio.
 - **El hook de agente es política, no aislamiento.** Decide si una llamada del host
-  puede arrancar; quien controla los settings del host puede sacarlo, el host corre
+  puede arrancar; deja los settings del host fuera de las herramientas del agente,
+  pero una persona o un proceso fuera del agente igual puede sacarlo, el host corre
   la herramienta igual si el hook se pasa del timeout o no arranca, y los alias o el
   `PATH` deciden qué corre de verdad bajo un nombre permitido. Ver
   [docs/AGENT_HOOKS.md](docs/AGENT_HOOKS.md#limits).
@@ -385,8 +450,8 @@ Son límites deliberados de la v0, no ocultos:
 
 ## Corpus de ataques reproducible
 
-`corpus/attacks.json` guarda cuarenta y cinco instrucciones sintéticas no confiables
-(cuatro son controles benignos), los pedidos de herramienta que generan y la decisión y regla
+`corpus/attacks.json` guarda cincuenta y ocho instrucciones sintéticas no confiables
+(cinco son controles benignos), los pedidos de herramienta que generan y la decisión y regla
 esperadas. Desde 0.1.1 incluye las clases de bypass encontradas en la revisión:
 lecturas recursivas que llegan a un secreto sin nombrarlo, opciones con archivo como
 valor, un `find` que escribe, un archivo dentro de un directorio protegido y
@@ -396,9 +461,15 @@ sustitución de comandos y una redirección. Los casos de `shell_ask`, `shell_ex
 y `network.allow` prueban los bypasses de cada permiso: un argumento de más, el
 programa escrito con un path o con `VAR=valor`, encadenamiento, `@.env`, user
 info, una barra invertida, un host parecido, otras formas de escribir una IP, otro
-puerto o esquema, un POST y una sesión con taint. Un caso puede sumar symlinks
+puerto o esquema, un POST y una sesión con taint. Desde 0.4.0 incluye valores
+secretos mandados por canales que la política permite (la query de un origen
+permitido, también codificada; un campo de formulario y un header de un `curl`
+permitido; una escritura; argumentos de MCP y de API) y copias de un secreto con
+nombres que la lista de protegidos no incluye o escritos con otras mayúsculas
+(`.ENV`). Un caso puede sumar archivos (`setup.files`), symlinks
 (`setup.symlinks`), paths protegidos (`policy.protected_paths_add`) o claves de
-política (`policy.set`) a su propio workspace. `scripts/run_corpus.py` le da a cada caso un workspace temporal y
+política (`policy.set`) a su propio workspace. `scripts/run_corpus.py` le da a
+cada caso un workspace temporal y
 una sesión de gateway nuevos, chequea cada decisión y registro de auditoría, y
 verifica que el canary no haya cambiado.
 
@@ -420,7 +491,7 @@ registra una sesión y propone una política ([CHANGELOG](CHANGELOG.md)). Lo que
 sigue:
 
 1. Tokens atados al emisor (DPoP), para que un access token robado no sirva.
-2. Taint a nivel de contenido, no sólo por path.
+2. Taint a nivel de contenido, más allá de los valores de `secret_files`.
 3. Llamadas concurrentes y el transporte Streamable HTTP en el proxy MCP.
 4. Ampliar el corpus sintético y sumar un benchmark aparte de seguimiento por modelos.
 
