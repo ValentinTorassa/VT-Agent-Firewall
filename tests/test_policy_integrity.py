@@ -116,8 +116,8 @@ class TestHostSettings(HookTestBase):
                     self.assertDenied(self.write(target), "fs-protected")
 
     def test_codex_settings(self):
-        files = hook.host_files("codex", [self.ws], environ={"HOME": str(self.tmp),
-                                                             "CODEX_HOME": str(self.ws / "ch")})
+        env = {"HOME": str(self.tmp), "CODEX_HOME": str(self.ws / "ch")}
+        files = hook.host_files("codex", [self.ws], environ=env)
         self.assertIn(self.ws / ".codex" / "hooks.json", files)
         self.assertIn(self.ws / "ch" / "config.toml", files)
         for name in ("config.toml", "hooks.json"):
@@ -247,8 +247,8 @@ class TestMcpProxyIntegrity(McpProxyTestBase):
         self.assertTrue(result["isError"])
         self.assertIn("mcp-protected-path", result["content"][0]["text"])
         client.close()
-        calls = [json.loads(l) for l in received.read_text().splitlines()
-                 if '"tools/call"' in l] if received.exists() else []
+        calls = [json.loads(line) for line in received.read_text().splitlines()
+                 if '"tools/call"' in line] if received.exists() else []
         self.assertEqual(calls, [])
 
 

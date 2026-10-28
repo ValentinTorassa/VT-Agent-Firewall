@@ -104,7 +104,8 @@ def values(text: str):
         if key is None:
             found.append((f"line {number}", line))
             words = line.split()
-            found += [(f"line {number}", after) for word, after in zip(words, words[1:])
+            found += [(f"line {number}", after)
+                      for word, after in zip(words, words[1:], strict=False)
                       if names_credential(word)]
         else:
             if names_credential(key):
@@ -166,7 +167,7 @@ def spellings(value: str) -> tuple[str, ...]:
     for offset in range(3):
         encoded = base64.b64encode(bytes(offset) + data).decode("ascii")
         start = (8 * offset + 5) // 6          # first character from the value alone
-        end = (8 * (offset + len(data))) // 6  # past the last one not shared with what follows
+        end = (8 * (offset + len(data))) // 6  # past the last one it does not share
         core = encoded[start:end]
         if len(core) >= MIN_LENGTH:
             forms.add(core)
