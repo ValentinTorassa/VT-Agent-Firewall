@@ -1,25 +1,3 @@
-## Submission drafts (remove before publishing)
-
-**r/netsec.** *Agent tool allowlists that still leak .env, and agents that
-rewrite their own policy.* I maintain an open-source, fail-closed gateway
-between coding agents (Claude Code and Codex hooks, MCP servers) and their
-tools, and after presenting it I found two classes of bugs in my own code: an
-allowlisted binary, origin or path that becomes the exfiltration channel
-(`curl -d @.env`, the key in an allowed URL's query string, `.env.local`,
-`cat .ENV` on macOS), and an agent that can edit the files that load the
-firewall. The write-up has minimal reproductions with before/after output, why
-verb- and path-based allowlists cannot catch these, the fixes in 0.4.0, and
-what is still not covered.
-
-**Hacker News.** *Your agent's allowlist still lets the .env out.* Allowlisting
-curl, an origin or a directory decides which tools a coding agent may use, not
-which data may leave through them. This walks through the leaks I found in my
-own agent firewall (curl's `@file`, a secret in an allowed URL, copies under
-other names, a hook that forgot the session) and the agent rewriting the
-settings that load the firewall, with the fixes and their limits.
-
----
-
 # The allowlist that still lets the `.env` out
 
 *Valentín Torassa, 2026-10-28. Code: [VT-Agent-Firewall](https://github.com/ValentinTorassa/VT-Agent-Firewall), Apache-2.0.*
