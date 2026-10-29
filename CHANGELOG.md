@@ -1,6 +1,72 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 — 2026-10-29
+
+Grants narrower than a whole binary or the whole network, learning that counts
+an ask only once it ran, and the two failures the OWASP ROS:SEC 2026 talk shows
+in the firewall itself, closed past the fixes it cites: an allowlist that still
+lets a secret out, and an agent that can change what judges it.
+
+- **Secret values never leave in a request (`secret_files`, `secret-egress`).**
+  An allowlist could still let a secret out: a value that reached the agent
+  some other way went out in the query string of an origin on `network.allow`,
+  as a form field of an allowlisted `curl`, in a file under `writable_dirs`, or
+  in an MCP or API argument. The firewall now reads the files on
+  `secret_files` and takes the values of keys that name a credential
+  (`API_KEY`, `DB_PASSWORD`, `_authToken`), URL passwords and lines that are
+  not assignments (token files, PEM bodies), 8 characters or more. A request
+  that carries one in any param of any tool, as written, percent-decoded once
+  or twice, in base64 at any offset or in hex, is refused before any other
+  rule, malformed or not, and taints the session. Its audit record keeps the
+  file, the key and the names of the params, never their values (verbose audit
+  too); so does the learning trace, and nothing a session did after a
+  `secret-egress` is learned from. Each secret file is a protected path. A
+  directory, a file over 1 MiB or an unreadable one is a policy that cannot
+  load; a missing one has no values. `agent_firewall/egress.py`.
+- **`protected_names`**: name patterns protected wherever they appear under the
+  sandbox, and everything below them (`.env.*`, `*.pem`, `.aws`), so a copy the
+  list does not spell out (`.env.local`, `api/.env`) is protected too. Names
+  above the sandbox root do not count.
+- **Protected paths and names compare without case.** On a case-insensitive
+  filesystem (macOS by default) `cat .ENV` opened `.env` and was allowed:
+  realpath keeps the case it was given. **Behaviour change:** on a
+  case-sensitive filesystem `.ENV` is protected too.
+- **The agent hook keeps a session's taint across calls.** Each call is a new
+  process, so after a denied `Read .env` the next call (a fetch to an allowed
+  origin, a `shell_ask` interpreter) started clean. The hook now records
+  tainted session ids in `<audit>.tainted`, next to the audit log and protected
+  like it; a store that cannot be read taints every session, one that cannot be
+  opened or written denies. **Behaviour change:** in a session that went for a
+  protected path, later network, `shell_ask` and `shell_exact` calls are
+  `taint-session`, as in the gateway. The learning trace's `tainted` is the
+  session's.
+- **The agent hook protects the host settings that install it**, whether they
+  exist or not: `.claude/settings.json`, `.claude/settings.local.json` and
+  `.mcp.json` under `--base-dir`, the sandbox root and `CLAUDE_PROJECT_DIR`;
+  `~/.claude/settings.json` (or `CLAUDE_CONFIG_DIR`) and `~/.claude.json`; for
+  Codex, `.codex/config.toml` and `.codex/hooks.json` in the project and in
+  `CODEX_HOME`. Writing `disableAllHooks`, pointing `--policy` at another file
+  or adding an MCP server that skips the proxy is `fs-protected`.
+  **Behaviour change:** calls that name these files were decided like any
+  other path. Learning traces list them in `self_protected`.
+- **`--protect PATH`** (hook and MCP proxy, repeatable) protects any other file
+  the setup depends on: a wrapper script, the client config that launches the
+  proxy.
+- **`--policy-sha256 HEX`** (hook and MCP proxy; `policy_sha256=` in `Gateway`,
+  `sha256=` in `Config`) pins the policy file. One changed by a route the hook
+  does not see (an allowed `git checkout`, a test runner, an unmatched tool, a
+  process outside the agent) is not loaded: the hook denies every call
+  (`fail-closed`, audited with both digests) and records nothing on
+  `PostToolUse`; the proxy refuses to start. The proxy also exits with a
+  message, not a traceback, on a policy it cannot load.
+- `policies/default.json` and `examples/hooks/agent-firewall.json` use
+  `protected_names` and `secret_files`. Corpus: 58 cases (eight new: secret
+  values through allowed channels, copies by name, another case), with
+  `setup.files`. `tests/test_allowlist_exfil.py` and
+  `tests/test_policy_integrity.py` run each scenario as it decided before, then
+  refused. README, README.es, `docs/AGENT_HOOKS.md` (a section on keeping the
+  firewall out of the agent's reach), `docs/LEARNING.md` and the threat model
+  document the keys, the flags and their limits.
 
 - **A param of the wrong type is refused, never raised** (#12). Each tool's
   params are type-checked before any rule runs: `path`, `cwd`, `content`,

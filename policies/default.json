@@ -4,6 +4,21 @@
     "demo_workspace/.env",
     "demo_workspace/fake_credentials.txt"
   ],
+  "protected_names": [
+    ".env",
+    ".env.*",
+    "*.pem",
+    "*.key",
+    "id_rsa*",
+    "id_ed25519*",
+    ".netrc",
+    ".aws",
+    ".ssh"
+  ],
+  "secret_files": [
+    "demo_workspace/.env",
+    "demo_workspace/fake_credentials.txt"
+  ],
   "writable_dirs": [
     "demo_workspace/normal"
   ],

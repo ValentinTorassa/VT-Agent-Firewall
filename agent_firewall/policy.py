@@ -9,11 +9,18 @@ normalized params:
   simple command with nothing for the shell to expand (shell_syntax.py)
 - URLs are parsed into scheme/host/port
 
-A protected path covers everything below it. Any request that names or
+A protected path covers everything below it, and a name on `protected_names`
+covers every path with that name under the sandbox. Any request that names or
 reaches one, blocked or not, taints the session.
 
+Before anything else, a request that carries a value of a `secret_files`
+file, in any param and in the spellings egress.py checks, is refused
+(`secret-egress`) and taints the session: an allowed channel is still not a
+way out for a secret.
+
 Rule precedence (per tool, most specific first):
-  fs-protected > fs-sandbox > tool-specific checks > allow/default-deny
+  secret-egress > unknown-tool, parse-error > fs-protected > fs-sandbox >
+  tool-specific checks > allow/default-deny
 Shell order: sh-syntax (via_shell only) > sh-allowlist > sh-paths > sh-args >
 sh-recursive. A binary off the allowlist passes sh-allowlist only through an
 exact argv on `shell_exact` (allow, `sh-exact`) or its name on `shell_ask`
@@ -36,6 +43,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from . import argv as argv_grammar
+from . import egress
 from . import network
 from . import shell_syntax
 from .config import Config
@@ -127,11 +135,17 @@ class PolicyEngine:
             "mcp.resource": self._mcp_resource,
             "api.call": self._api_call,
         }.get(req.tool)
-        if handler is None:
-            return self._decide(req, Decision.BLOCK, "unknown-tool",
-                                f"no policy for tool '{req.tool}' (default-deny)",
-                                "medium", {})
         try:
+            # Whatever the tool, and even in a request that is malformed or for
+            # a tool with no policy: a secret value never leaves, and never
+            # reaches the audit log.
+            leak = self._secret_egress(req, session)
+            if leak is not None:
+                return leak
+            if handler is None:
+                return self._decide(req, Decision.BLOCK, "unknown-tool",
+                                    f"no policy for tool '{req.tool}' (default-deny)",
+                                    "medium", {})
             check_param_types(req.tool, req.params)
             return handler(req, session)
         except (KeyError, TypeError, ValueError) as e:
@@ -144,6 +158,27 @@ class PolicyEngine:
             return self._decide(req, Decision.BLOCK, "parse-error",
                                 f"request could not be evaluated: "
                                 f"{type(e).__name__}: {e}", "medium", {})
+
+    # -- secret egress ------------------------------------------------------
+
+    def _secret_egress(self, req, session) -> PolicyDecision | None:
+        """A request that carries a secret value never leaves, whatever the
+        tool, the grant or the destination. The value has reached the agent,
+        so the session is tainted. The decision names the file and the key;
+        the audit record keeps no param values (`redacted`)."""
+        secret = egress.find(self.cfg.secrets, req.params)
+        if secret is None:
+            return None
+        session.tainted = True
+        return PolicyDecision(
+            request=req, decision=Decision.BLOCK, rule_id="secret-egress",
+            reason=(f"the request carries the value of {secret.name} from the secret "
+                    f"file {secret.source}: a secret value never leaves, through any "
+                    f"tool, grant or allowed destination"),
+            risk="high", rules_matched=["secret-egress"],
+            normalized={"redacted": "the request carries a secret value",
+                        "secret_file": str(secret.source), "secret_name": secret.name},
+            redacted=True)
 
     # -- helpers ----------------------------------------------------------
 

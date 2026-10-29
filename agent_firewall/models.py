@@ -35,3 +35,6 @@ class PolicyDecision:
     risk: str                # low | medium | high
     rules_matched: list[str]  # every rule that fired, in evaluation order
     normalized: dict          # canonical params the executor is allowed to use
+    # The request carries a secret value (secret-egress): the audit record keeps
+    # the names of its params, never their values.
+    redacted: bool = False

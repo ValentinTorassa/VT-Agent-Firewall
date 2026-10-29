@@ -66,25 +66,29 @@ Every decision is a line in the audit log, with `host`, `host_tool`,
 `correlation_id`. An allowed or ask call is recorded with outcome `delegated`
 before the hook answers: the host runs the tool, so there is no `executed`
 record and no result preview. A malformed event is recorded as `parse-error`
-with a digest of the raw input. The policy file and the audit log passed on the
-command line are added to the protected paths automatically, so the agent can
-neither read nor rewrite them through a gated tool.
+with a digest of the raw input. The policy file, the audit log, the session
+taint store next to it, the learning trace and the host settings that install the
+hook are added to the protected paths automatically, so the agent can neither
+read nor rewrite them through a gated tool
+([below](#keeping-the-firewall-out-of-the-agents-reach)).
 
 ## Install for Claude Code
 
 1. Install the package and find the absolute path of the hook:
 
    ```bash
-   pip install 'vt-agent-firewall>=0.3.0'
+   pip install 'vt-agent-firewall>=0.4.0'
    command -v vt-agent-firewall-hook
    ```
 
 2. Write a policy for the project. [`examples/hooks/agent-firewall.json`](../examples/hooks/agent-firewall.json)
    is a starting point: the project is the sandbox, `.env`, `.claude`, `.codex`,
    `.mcp.json`, `.git/config` and `.git/hooks` are protected (they hold secrets,
-   the agent's own settings, or something that runs code), and only `src`,
-   `tests` and `docs` are writable without a prompt. Save it as
-   `.claude/agent-firewall.json` in the project and adjust the lists.
+   the agent's own settings, or something that runs code), `protected_names`
+   covers `.env.local`, `api/.env`, keys and cloud credentials anywhere in the
+   project, `secret_files` lists the files whose values may not leave in any
+   request, and only `src`, `tests` and `docs` are writable without a prompt.
+   Save it as `.claude/agent-firewall.json` in the project and adjust the lists.
 
 3. Add the hook to a settings file. `.claude/settings.json` applies to everyone
    who works on the project, `.claude/settings.local.json` only to you,
@@ -116,7 +120,9 @@ neither read nor rewrite them through a gated tool.
    `PATH`. Keep the audit log outside the project. `timeout` is in seconds; keep
    it above the hook's own `--deadline` (20 s by default) so the hook denies
    before Claude Code gives up on it. Add `|mcp__.*` to the matcher to put MCP
-   tools under the policy's `mcp_registry` as well.
+   tools under the policy's `mcp_registry` as well. To keep the policy itself
+   out of the agent's reach, pin it and keep this command outside the project
+   ([below](#keeping-the-firewall-out-of-the-agents-reach)).
 
 4. Test it before you rely on it. A hook that cannot start does not block
    anything (see the limits below), so feed it a fake event first:
@@ -153,11 +159,64 @@ Codex skips a new or changed hook until you trust it in `/hooks`: until then
 nothing is enforced. Codex's `Bash` covers both the shell tool and unified exec
 (`exec_command`). Add `mcp__.*` to the matcher regex for MCP tools.
 
+## Keeping the firewall out of the agent's reach
+
+If the agent can change the policy, the policy is a suggestion. The hook does
+three things about that; the rest depends on where you install it.
+
+- **Its own files are protected paths**, whether they exist or not: the policy,
+  the audit log, the session taint store next to it (`<audit>.tainted`), the
+  learning trace, and the host settings that load the hook.
+
+  | Host | Under `--base-dir` and the sandbox root | User level |
+  |---|---|---|
+  | Claude Code | `.claude/settings.json`, `.claude/settings.local.json`, `.mcp.json` (also under `CLAUDE_PROJECT_DIR`) | `~/.claude/settings.json` and `settings.local.json` next to it (under `CLAUDE_CONFIG_DIR` when set), `~/.claude.json` |
+  | Codex | `.codex/config.toml`, `.codex/hooks.json` | `config.toml` and `hooks.json` in `~/.codex` (or `CODEX_HOME`) |
+
+  A gated tool that names one is refused and taints the session: a `Write` of
+  `.claude/settings.local.json` with `{"disableAllHooks": true}`, an `Edit` that
+  points `--policy` at another file, a `.mcp.json` server that skips the proxy,
+  a Codex patch to `.codex/hooks.json`. `--protect PATH` (repeatable) adds
+  anything else your setup depends on: a wrapper script, or the virtualenv the
+  hook runs from when it lives inside the project.
+- **The policy can be pinned.** With `--policy-sha256 HEX` the hook refuses a
+  policy file whose SHA-256 is not that one: every call is denied
+  (`fail-closed`, audited with both digests) until a human reviews the file and
+  pins the new digest. That covers a policy changed by a route the hook does not
+  see: an allowed `git checkout` or `git pull` that brings another
+  `.claude/agent-firewall.json`, a test runner on `shell_exact` that writes it, a
+  tool you did not match, a process outside the agent.
+
+  ```bash
+  sha256sum .claude/agent-firewall.json      # macOS: shasum -a 256
+  ```
+
+  ```json
+  "command": "vt-agent-firewall-hook --policy \"$CLAUDE_PROJECT_DIR/.claude/agent-firewall.json\" --policy-sha256 <digest> --base-dir \"$CLAUDE_PROJECT_DIR\" --audit \"$HOME/.local/state/vt-agent-firewall/audit.jsonl\""
+  ```
+
+  A pin is as safe as the file that holds it: put this command in settings the
+  project cannot change, `~/.claude/settings.json` (outside the sandbox, and
+  protected by the hook) or managed settings with `allowManagedHooksOnly`.
+  Pin again after each change you make to the policy, including a learning-mode
+  proposal you accept. The MCP proxy takes the same flag and refuses to start.
+- **A session's taint outlives the call.** Each hook call is a new process, so
+  the hook keeps the ids of tainted sessions in `<audit>.tainted`. Once a
+  session names or reaches a protected path, or carries a secret value, its
+  later calls get no network, `shell_ask` or `shell_exact`, as in the gateway.
+  A store that cannot be read taints every session; one that cannot be opened
+  or written denies. Another `session_id` starts clean.
+
 ## What it blocks with the example rules
 
 | Tool call | Answer |
 |---|---|
 | `Read .env`, `Edit` through a symlink to `.env` | deny `fs-protected` |
+| `Read .env.local`, `Bash: cat api/.env` (names the list does not spell out) | deny `fs-protected` / `sh-paths` (`protected_names`) |
+| `WebFetch` or `Bash: curl ...` with a value from `.env` in the URL or an argument, raw or encoded | deny `secret-egress` |
+| `Write .claude/settings.local.json` (`disableAllHooks`), `Edit .claude/settings.json` | deny `fs-protected` |
+| a fetch to an allowed origin later in a session that tried `Read .env` | deny `taint-session` |
+| any call once the pinned policy file changed (`--policy-sha256`) | deny `fail-closed` |
 | `Write` outside the project | deny `fs-sandbox` |
 | `Write src/app.py` | silent (allowed) |
 | `Write README.md` (inside the project, outside `writable_dirs`) | ask `fs-write-scope` (Codex: deny) |
@@ -232,9 +291,11 @@ These are the boundaries of a hook, stated plainly:
   `disableAllHooks` turns every hook off (for a single run too, through
   `--settings`), and a committed `.claude/settings.json` can be edited by anyone
   with commit access.
-  The agent cannot edit the settings through a gated tool when `.claude` is
-  protected, but a tool you did not match, or a process outside the agent, can.
-  For enforcement, deploy the hook in managed settings with
+  The hook keeps the settings files away from the agent's gated tools
+  ([above](#keeping-the-firewall-out-of-the-agents-reach)), but a tool you did
+  not match, or a process outside the agent, can still edit them: pin the
+  policy and keep the hook command where the project cannot reach. For
+  enforcement, deploy the hook in managed settings with
   `allowManagedHooksOnly`; Claude Code also lets an installed mod approve a call
   a hook blocked unless the hook comes from managed settings.
 - **The host fails open around it.** A timeout, a missing or mistyped command
@@ -254,11 +315,12 @@ These are the boundaries of a hook, stated plainly:
   files; `WebSearch`, `Artifact`, `SendUserFile`, `PushNotification` and
   `RemoteTrigger` send data out. Deny the ones you do not use with Claude Code
   permission rules. Files you attach with `@` are inserted without any tool call.
-- **Each call is its own session.** Taint does not carry from one hook call to
-  the next. With network deny-all every network call is blocked anyway; with a
-  network allowlist, or `shell_ask` and `shell_exact` entries, a call after a
-  denied `Read .env` is decided on its own, so keep those entries to what you
-  would allow from any session.
+- **Taint follows the host's session id.** It carries from one hook call to the
+  next through `<audit>.tainted`, but a call without a `session_id` is decided on
+  its own, a new session starts clean, and hooks with different audit logs keep
+  different stores. A secret that reached the agent without a protected path
+  being named (an approved interpreter, a tool you did not match) does not taint
+  the session; only `secret_files` values are recognized when they go out.
 - **The audit records the request for approval, not the answer.** The human's
   choice in the host's prompt never reaches the audit log. In learning mode the
   trace's `ran` records (`PostToolUse`) show which calls ran
