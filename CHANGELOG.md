@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.4.0 — 2026-10-28
+## 0.4.0 — 2026-10-29
 
 Grants narrower than a whole binary or the whole network, learning that counts
 an ask only once it ran, and the two failures the OWASP ROS:SEC 2026 talk shows
