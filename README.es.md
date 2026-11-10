@@ -183,7 +183,10 @@ herramienta que el hook no ve, un resultado de MCP) no puede salir por un origen
 de `network.allow`, un argumento de un `curl` permitido, un archivo de
 `writable_dirs` ni un argumento de MCP o de API. Es un cable trampa para el
 valor, no contención: un valor partido, invertido, comprimido o cifrado no se
-reconoce, y lo que no está en `secret_files` no se chequea.
+reconoce, y lo que no está en `secret_files` no se chequea. El artículo
+[The allowlist that still lets the `.env` out](docs/posts/2026-10-28-the-allowlist-that-lets-the-env-out.md)
+(en inglés) recorre esas fugas, y el agente reescribiendo su propia política, con
+salidas reales del hook.
 
 ## Credenciales delegadas (`api.call`)
 
@@ -490,7 +493,8 @@ el hook `PreToolUse` para Claude Code y Codex; la v0.3.0 suma el modo aprendizaj
 registra una sesión y propone una política; la v0.4.0 suma permisos más acotados,
 cierra los caminos por los que una allowlist igual dejaba salir un secreto y deja la
 política y los settings que cargan el firewall fuera del alcance del agente
-([CHANGELOG](CHANGELOG.md)). Lo que
+([CHANGELOG](CHANGELOG.md); el artículo, en inglés:
+[The allowlist that still lets the `.env` out](docs/posts/2026-10-28-the-allowlist-that-lets-the-env-out.md)). Lo que
 sigue:
 
 1. Tokens atados al emisor (DPoP), para que un access token robado no sirva.

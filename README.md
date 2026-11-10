@@ -162,7 +162,10 @@ hook does not see, an MCP result) cannot leave through an origin on
 `network.allow`, an argument of an allowlisted `curl`, a file in `writable_dirs`,
 or an MCP or API argument. It is a tripwire for the value, not containment: a
 value split, reversed, compressed or encrypted is not recognized, and data that
-is not in `secret_files` is not checked at all.
+is not in `secret_files` is not checked at all. The article
+[The allowlist that still lets the `.env` out](docs/posts/2026-10-28-the-allowlist-that-lets-the-env-out.md)
+walks through those leaks, and the agent rewriting its own policy, with real
+hook output.
 
 ## Delegated credentials (`api.call`)
 
@@ -451,7 +454,8 @@ the MCP proxy; v0.1.1 closes the bypasses found in review; v0.2.0 adds the
 `PreToolUse` hook for Claude Code and Codex; v0.3.0 adds learning mode, which records a
 session and proposes a policy; v0.4.0 adds narrower grants, closes the ways an
 allowlist still let a secret out, and keeps the agent away from the policy and the
-settings that load the firewall ([CHANGELOG](CHANGELOG.md)).
+settings that load the firewall ([CHANGELOG](CHANGELOG.md); write-up:
+[The allowlist that still lets the `.env` out](docs/posts/2026-10-28-the-allowlist-that-lets-the-env-out.md)).
 Next:
 
 1. Sender-constrained tokens (DPoP), so a stolen access token is useless.
